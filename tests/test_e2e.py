@@ -38,6 +38,7 @@ from app.prompt import (  # noqa: E402
     FEEDBACK_THANKS_RATING,
     SELF_IDENTITY_RESPONSE,
 )
+from app.services.ai_service import AIServiceError  # noqa: E402
 
 results = []
 
@@ -461,6 +462,59 @@ def main():
             faq_reply != faq_agent._FALLBACK_MESSAGE,
             faq_reply,
         )
+
+        # 10b. faq_agent/recommend_agent full-list-grounding: the keyword/
+        # fuzzy matcher was replaced because it kept failing on real
+        # phrasings - "about your product" scored zero on every FAQ entry
+        # (fell to the generic fallback) and "pricing details"-style phrases
+        # scored just high enough against an UNRELATED entry to answer the
+        # wrong question. Now the full FAQ/service list is always passed to
+        # the AI to reason over, instead of a pre-selected keyword match.
+        # These are the exact two reported failures plus a handful of other
+        # varied rephrasings, checked against the real AI (not mocked) to
+        # confirm the fix generalizes rather than papering over two strings.
+        faq_rephrasings = {
+            "I want to know about your product": ("service", "develop", "solution", "website", "software", "ai"),
+            "can you tell me the pricing details": ("cost", "price", "pricing", "quot", "depend"),
+            "whats this going to cost me": ("cost", "price", "pricing", "quot", "depend"),
+            "what do you guys actually do": ("service", "develop", "solution"),
+            "where's your office": ("uran", "mumbai", "based", "located"),
+            "do interns get paid": ("intern", "paid", "unpaid"),
+        }
+        for phrase, expected_markers in faq_rephrasings.items():
+            time.sleep(_REQUEST_PACING_SECONDS)
+            reply = faq_agent.get_faq_response(phrase)
+            check(
+                f"faq_agent (full-list grounding): '{phrase}' is not the generic fallback",
+                reply != faq_agent._FALLBACK_MESSAGE,
+                reply,
+            )
+            check(
+                f"faq_agent (full-list grounding): '{phrase}' answer is topically relevant",
+                any(marker in reply.lower() for marker in expected_markers),
+                reply,
+            )
+
+        recommend_rephrasings = {
+            "our support team is drowning in the same repetitive tickets every day": (
+                "automat", "chat", "ai", "workflow", "process",
+            ),
+            "I need something to talk to my customers automatically": ("automat", "chat", "ai"),
+            "I want an app for both iPhone and Android users": ("mobile", "app", "android", "ios"),
+        }
+        for phrase, expected_markers in recommend_rephrasings.items():
+            time.sleep(_REQUEST_PACING_SECONDS)
+            reply = recommend_agent.get_recommendation_response(phrase)
+            check(
+                f"recommend_agent (full-list grounding): '{phrase}' is not the generic fallback",
+                reply != recommend_agent._FALLBACK_MESSAGE,
+                reply,
+            )
+            check(
+                f"recommend_agent (full-list grounding): '{phrase}' answer is topically relevant",
+                any(marker in reply.lower() for marker in expected_markers),
+                reply,
+            )
 
         # 11. "hi" typed at the lead-collection "name" step: must be rejected
         # as off-flow (too obviously a greeting to be a real name), not
@@ -892,6 +946,123 @@ def _feature_reuse_lead_details():
         lead_agent._completed_leads.pop(session_id2, None)
 
 
+def _bug6_faq_recommend_full_list_grounding():
+    """Regression for the FAQ/recommend keyword-matcher brittleness reported
+    from real usage: "about your product" scored zero against every FAQ
+    entry (fell through to the generic "don't have that information"
+    fallback) and "what's this going to cost me" scored just high enough
+    against an UNRELATED entry (an API-integration FAQ) to confidently
+    answer the wrong question. Both are confirmed below as matcher-level
+    validity checks. The fix replaces "pre-select one best match, then let
+    the AI phrase around just that" with "always pass the AI the FULL
+    FAQ/service list and let it reason over all of it" - asserted here by
+    checking the full list actually lands in the prompt sent to the AI,
+    regardless of whether the old matcher would have found anything. The
+    matcher itself is untouched and still used as the AI-down fallback,
+    which is also checked here.
+    """
+    # Validity checks: confirm the old matcher genuinely fails on these two
+    # real phrasings the way the bug report describes, so this regression
+    # test is actually exercising the reported failure and not a strawman.
+    check(
+        "Bug6 (mocked): matcher validity - 'about your product' has zero FAQ keyword matches",
+        faq_agent.find_best_faqs("I want to know about your product") == [],
+        None,
+    )
+    cost_matches = faq_agent.find_best_faqs("whats this going to cost me")
+    check(
+        "Bug6 (mocked): matcher validity - 'what's this going to cost me' matches an unrelated FAQ, not a cost one",
+        len(cost_matches) > 0 and "cost" not in cost_matches[0]["question"].lower(),
+        cost_matches,
+    )
+    check(
+        "Bug6 (mocked): matcher validity - recommend phrase without automation vocabulary has zero service matches",
+        recommend_agent.find_best_services(
+            "our support team is drowning in the same repetitive tickets every day"
+        )[0]
+        == [],
+        None,
+    )
+
+    # Fix check: the full FAQ list (not a keyword-matched subset) is what
+    # actually gets sent to the AI, for a phrase the old matcher whiffed on
+    # entirely.
+    captured_faq = {}
+
+    def _capture_faq(prompt, system_prompt=None):
+        captured_faq["prompt"] = prompt
+        return "mocked faq answer"
+
+    with patch("app.agents.faq_agent.get_ai_response", side_effect=_capture_faq):
+        faq_reply = faq_agent.get_faq_response("I want to know about your product")
+
+    all_faq_questions = [f["question"] for f in faq_agent._load_faqs()]
+    check(
+        "Bug6 (mocked): faq_agent passes the FULL FAQ list to the AI, not a keyword-matched subset",
+        all(q in captured_faq["prompt"] for q in all_faq_questions),
+        f"{len(all_faq_questions)} FAQ questions expected in the prompt",
+    )
+    check(
+        "Bug6 (mocked): faq_agent no longer falls back to the generic message for a zero-keyword-match phrase",
+        faq_reply != faq_agent._FALLBACK_MESSAGE,
+        faq_reply,
+    )
+
+    with patch("app.agents.faq_agent.get_ai_response", side_effect=_capture_faq):
+        faq_agent.get_faq_response("whats this going to cost me")
+    real_cost_faqs = [q for q in all_faq_questions if "cost" in q.lower() or "payment" in q.lower()]
+    check(
+        "Bug6 (mocked): 'what's this going to cost me' prompt includes the real cost/payment FAQ entries",
+        all(q in captured_faq["prompt"] for q in real_cost_faqs) and len(real_cost_faqs) > 0,
+        real_cost_faqs,
+    )
+
+    # AI-down fallback still degrades to the old matcher-based behavior.
+    with patch("app.agents.faq_agent.get_ai_response", side_effect=AIServiceError("down")):
+        faq_fallback_reply = faq_agent.get_faq_response("What services does XQORA provide?")
+    expected_fallback = faq_agent.find_best_faqs("What services does XQORA provide?")[0]["answer"]
+    check(
+        "Bug6 (mocked): faq_agent falls back to the keyword-matched answer when the AI is unavailable",
+        faq_fallback_reply == expected_fallback,
+        faq_fallback_reply,
+    )
+
+    # Same principle, recommend_agent: full services list reaches the AI for
+    # a phrase the old matcher whiffed on entirely.
+    captured_recommend = {}
+
+    def _capture_recommend(prompt, system_prompt=None):
+        captured_recommend["prompt"] = prompt
+        return "mocked recommend answer"
+
+    with patch("app.agents.recommend_agent.get_ai_response", side_effect=_capture_recommend):
+        recommend_reply = recommend_agent.get_recommendation_response(
+            "our support team is drowning in the same repetitive tickets every day"
+        )
+
+    all_service_names = [s["name"] for s in recommend_agent._load_services()]
+    check(
+        "Bug6 (mocked): recommend_agent passes the FULL services list to the AI, not a keyword-matched subset",
+        all(name in captured_recommend["prompt"] for name in all_service_names),
+        f"{len(all_service_names)} service names expected in the prompt",
+    )
+    check(
+        "Bug6 (mocked): recommend_agent no longer falls back to the generic message for a zero-keyword-match phrase",
+        recommend_reply != recommend_agent._FALLBACK_MESSAGE,
+        recommend_reply,
+    )
+
+    with patch("app.agents.recommend_agent.get_ai_response", side_effect=AIServiceError("down")):
+        recommend_fallback_reply = recommend_agent.get_recommendation_response(
+            "I need a chatbot for customer support"
+        )
+    check(
+        "Bug6 (mocked): recommend_agent falls back to the keyword-matched answer when the AI is unavailable",
+        "AI Automation" in recommend_fallback_reply,
+        recommend_fallback_reply,
+    )
+
+
 def _feedback_response_parsing_unit():
     check("Feedback (mocked): is_closing_message matches 'thanks'", feedback_agent.is_closing_message("thanks"), None)
     check(
@@ -1088,6 +1259,7 @@ def run_mocked_tests():
     _bug5_self_identity()
     _bug_escalate_vs_unrelated_professional_service()
     _bug_check_in_and_trivia_misclassification()
+    _bug6_faq_recommend_full_list_grounding()
     _feature_reuse_lead_details()
 
     _feedback_response_parsing_unit()

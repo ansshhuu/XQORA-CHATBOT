@@ -32,11 +32,13 @@ would need a shared store (e.g. Redis) instead.
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass
 
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
+from app.core.config import SESSION_TTL_SECONDS
 from app.database import Lead, SessionLocal, sanitize_input
 from app.services.ai_service import AIServiceError, get_ai_response
 from app.services.lead_service import forward_lead
@@ -189,12 +191,63 @@ def _resume_nudge(field: str) -> str:
 _sessions_lock = threading.Lock()
 _sessions: dict[str, dict] = {}
 
+_session_locks_lock = threading.Lock()
+_session_locks: dict[str, threading.Lock] = {}
+
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    with _session_locks_lock:
+        return _session_locks.setdefault(session_id, threading.Lock())
+
 
 _completed_leads_lock = threading.Lock()
 _completed_leads: dict[str, dict] = {}
 
+_SWEEP_INTERVAL_SECONDS = 300
+
+_touch_lock = threading.Lock()
+_last_touch: dict[str, float] = {}
+_last_sweep = 0.0
+
+
+def _touch(session_id: str) -> None:
+    """Record activity for `session_id` so a TTL sweep won't evict it while
+    it's still in use."""
+    with _touch_lock:
+        _last_touch[session_id] = time.monotonic()
+
+
+def _sweep_expired_sessions(now: float) -> None:
+    """Evict session state (collection progress, completed-lead reuse
+    details, per-session locks) that's been untouched for over
+    SESSION_TTL_SECONDS, so a long-running instance doesn't accumulate one
+    entry per visitor forever. Runs at most once per _SWEEP_INTERVAL_SECONDS,
+    triggered opportunistically off real traffic (see is_collecting below)
+    rather than a background thread/timer."""
+    global _last_sweep
+    with _touch_lock:
+        if now - _last_sweep < _SWEEP_INTERVAL_SECONDS:
+            return
+        _last_sweep = now
+        expired = [sid for sid, ts in _last_touch.items() if now - ts > SESSION_TTL_SECONDS]
+        for sid in expired:
+            del _last_touch[sid]
+
+    if not expired:
+        return
+    with _sessions_lock:
+        for sid in expired:
+            _sessions.pop(sid, None)
+    with _completed_leads_lock:
+        for sid in expired:
+            _completed_leads.pop(sid, None)
+    with _session_locks_lock:
+        for sid in expired:
+            _session_locks.pop(sid, None)
+
 
 def _get_session(session_id: str) -> dict:
+    _touch(session_id)
     with _sessions_lock:
         return _sessions.setdefault(session_id, {field: None for field in LEAD_FIELDS})
 
@@ -202,6 +255,10 @@ def _get_session(session_id: str) -> dict:
 def reset_session(session_id: str) -> None:
     with _sessions_lock:
         _sessions.pop(session_id, None)
+    with _session_locks_lock:
+        _session_locks.pop(session_id, None)
+    with _touch_lock:
+        _last_touch.pop(session_id, None)
 
 
 def _store_completed_lead(session_id: str, state: dict) -> None:
@@ -221,7 +278,12 @@ def is_collecting(session_id: str) -> bool:
     turn instead of re-running intent classification, which would otherwise
     misroute or guardrail-block plain answers like "John Doe" or a bare
     email address.
+
+    Called on every turn by the orchestrator regardless of session, which
+    also makes it a convenient place to piggyback the TTL sweep so expired
+    session state gets cleaned up off ordinary traffic.
     """
+    _sweep_expired_sessions(time.monotonic())
     with _sessions_lock:
         state = _sessions.get(session_id)
         return bool(state and state.get("_awaiting"))
@@ -238,7 +300,7 @@ def _extract_value(field: str, message: str) -> str:
     message = message.strip()
     if field == "email":
         match = _EMAIL_EXTRACT_RE.search(message)
-        return match.group(0) if match else message
+        return match.group(0).rstrip(".,!?;:") if match else message
     if field == "phone":
         match = _PHONE_EXTRACT_RE.search(message)
         return match.group(0).strip() if match else message
@@ -312,6 +374,17 @@ def _advance_to_next_field(state: dict) -> LeadStepResult | None:
 
 
 def handle_lead_message(
+    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
+) -> LeadStepResult:
+    """Serialized per session_id so concurrent requests for the same session
+    (double-clicked send, a client retry) can't race on the session's dict -
+    e.g. both reading a field as unfilled and both writing to it, or both
+    finalizing the same lead."""
+    with _get_session_lock(session_id):
+        return _handle_lead_message_locked(db, session_id, message, background_tasks)
+
+
+def _handle_lead_message_locked(
     db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
 ) -> LeadStepResult:
     state = _get_session(session_id)

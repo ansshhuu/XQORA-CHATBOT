@@ -16,10 +16,29 @@ _RATE_WINDOW_SECONDS = 60
 
 _request_log: dict[str, deque] = defaultdict(deque)
 
+_SWEEP_INTERVAL_SECONDS = 300
+_last_sweep = 0.0
+
+
+def _sweep_stale_entries(now: float) -> None:
+    """Drop rate-limit entries for IPs that haven't made a request in over a
+    window, so the table doesn't grow unbounded over the life of the process.
+    Runs at most once per _SWEEP_INTERVAL_SECONDS to keep the cost negligible."""
+    global _last_sweep
+    if now - _last_sweep < _SWEEP_INTERVAL_SECONDS:
+        return
+    _last_sweep = now
+    stale_keys = [key for key, log in _request_log.items() if not log or now - log[-1] > _RATE_WINDOW_SECONDS]
+    for key in stale_keys:
+        del _request_log[key]
+
+
+_MAX_SESSION_ID_LENGTH = 128
+
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LENGTH)
-    session_id: str | None = None
+    session_id: str | None = Field(default=None, max_length=_MAX_SESSION_ID_LENGTH)
     user_id: str | None = None
 
     @field_validator("message")
@@ -37,6 +56,7 @@ class ChatResponse(BaseModel):
 
 def _enforce_rate_limit(key: str) -> None:
     now = time.monotonic()
+    _sweep_stale_entries(now)
     log = _request_log[key]
     while log and now - log[0] > _RATE_WINDOW_SECONDS:
         log.popleft()

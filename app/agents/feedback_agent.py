@@ -31,10 +31,12 @@ conversation afterward.
 """
 import re
 import threading
+import time
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.core.config import SESSION_TTL_SECONDS
 from app.database import save_feedback
 from app.prompt import FEEDBACK_THANKS_COMMENT, FEEDBACK_THANKS_RATING
 
@@ -53,7 +55,7 @@ def is_closing_message(message: str) -> bool:
     return bool(_CLOSING_RE.match(message.strip()))
 
 
-_NUMERIC_RATING_RE = re.compile(r"^\s*([1-5])\s*(?:/\s*5)?\s*[.,!-]?\s*(.*)$")
+_NUMERIC_RATING_RE = re.compile(r"^\s*([1-5])(?!\d)\s*(?:/\s*5)?\s*[.,!-]?\s*(.*)$")
 
 _WORD_RATING_MAP = {
     "excellent": 5, "amazing": 5, "awesome": 5, "perfect": 5, "fantastic": 5,
@@ -91,6 +93,41 @@ class FeedbackStepResult:
 _lock = threading.Lock()
 
 _feedback_state: dict[str, str] = {}
+_last_touch: dict[str, float] = {}
+
+_session_locks_lock = threading.Lock()
+_session_locks: dict[str, threading.Lock] = {}
+
+_SWEEP_INTERVAL_SECONDS = 300
+_last_sweep = 0.0
+
+
+def _get_session_lock(session_id: str) -> threading.Lock:
+    with _session_locks_lock:
+        return _session_locks.setdefault(session_id, threading.Lock())
+
+
+def _sweep_expired(now: float) -> None:
+    """Evict feedback ask/response state and per-session locks that have
+    been untouched for over SESSION_TTL_SECONDS, mirroring lead_agent's TTL
+    sweep so this store doesn't grow for the life of the process. Runs at
+    most once per _SWEEP_INTERVAL_SECONDS, triggered opportunistically off
+    real traffic (see is_awaiting_response below)."""
+    global _last_sweep
+    with _lock:
+        if now - _last_sweep < _SWEEP_INTERVAL_SECONDS:
+            return
+        _last_sweep = now
+        expired = [sid for sid, ts in _last_touch.items() if now - ts > SESSION_TTL_SECONDS]
+        for sid in expired:
+            _feedback_state.pop(sid, None)
+            _last_touch.pop(sid, None)
+
+    if not expired:
+        return
+    with _session_locks_lock:
+        for sid in expired:
+            _session_locks.pop(sid, None)
 
 
 def should_ask(session_id: str) -> bool:
@@ -102,9 +139,13 @@ def should_ask(session_id: str) -> bool:
 def mark_asked(session_id: str) -> None:
     with _lock:
         _feedback_state[session_id] = "asked"
+        _last_touch[session_id] = time.monotonic()
 
 
 def is_awaiting_response(session_id: str) -> bool:
+    """Called on every incoming turn by the orchestrator regardless of
+    session, which makes it a convenient place to piggyback the TTL sweep."""
+    _sweep_expired(time.monotonic())
     with _lock:
         return _feedback_state.get(session_id) == "asked"
 
@@ -112,10 +153,25 @@ def is_awaiting_response(session_id: str) -> bool:
 def reset(session_id: str) -> None:
     with _lock:
         _feedback_state.pop(session_id, None)
+        _last_touch.pop(session_id, None)
+    with _session_locks_lock:
+        _session_locks.pop(session_id, None)
 
 
 def handle_feedback_response(db: Session, session_id: str, message: str) -> FeedbackStepResult:
-    """Only call this when is_awaiting_response(session_id) is True."""
+    """Only call this when is_awaiting_response(session_id) is True.
+
+    Serialized per session_id (like lead_agent's handle_lead_message) so a
+    double-clicked send or client retry can't race past is_awaiting_response
+    twice and save two Feedback rows for one reply."""
+    with _get_session_lock(session_id):
+        return _handle_feedback_response_locked(db, session_id, message)
+
+
+def _handle_feedback_response_locked(db: Session, session_id: str, message: str) -> FeedbackStepResult:
+    if not is_awaiting_response(session_id):
+        return FeedbackStepResult(reply="", handled=False)
+
     stripped = message.strip()
 
     rating, remainder = _extract_rating(stripped)
@@ -133,10 +189,12 @@ def handle_feedback_response(db: Session, session_id: str, message: str) -> Feed
     if rating is None and comments is None:
         with _lock:
             _feedback_state[session_id] = "declined"
+            _last_touch[session_id] = time.monotonic()
         return FeedbackStepResult(reply="", handled=False)
 
     save_feedback(db, session_id=session_id, rating=rating, comments=comments)
     with _lock:
         _feedback_state[session_id] = "given"
+        _last_touch[session_id] = time.monotonic()
     reply = FEEDBACK_THANKS_RATING if rating is not None else FEEDBACK_THANKS_COMMENT
     return FeedbackStepResult(reply=reply, handled=True)

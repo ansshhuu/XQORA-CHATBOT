@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.core.config import CORS_ORIGINS
+from app.core.config import CORS_ORIGINS, check_required_keys
 from app.database import init_db
 from app.routes import chat
 
@@ -51,6 +51,7 @@ app.mount("/static", NoCacheStaticFiles(directory="static"), name="static")
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    check_required_keys()
 
 
 @app.exception_handler(Exception)

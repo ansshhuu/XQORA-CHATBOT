@@ -258,6 +258,6 @@
 
   sendBtn.addEventListener("click", sendMessage);
   inputEl.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") sendMessage();
+    if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) sendMessage();
   });
 })();

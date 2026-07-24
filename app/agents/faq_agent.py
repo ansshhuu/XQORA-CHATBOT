@@ -1,29 +1,26 @@
 """
-FAQ agent: finds the best-matching FAQ entries, then uses ai_service to
-phrase a natural answer grounded strictly in that content.
+FAQ agent: lightweight RAG over data/faq.json. Rather than pre-selecting one
+"best" entry with a keyword/fuzzy matcher and hoping it guessed right, the
+full FAQ list (all ~46 Q&A pairs - small enough to fit comfortably in one
+prompt, no vector DB needed) is passed as context on every call, and the AI
+itself finds whatever entry (or entries) actually answer the question and
+phrases a natural reply grounded strictly in that content.
 
-Accepts optional recent_context (recent chat history, same shape orchestrator
-already builds for intent_agent) so a short follow-up reply with no FAQ
-keywords of its own can still be matched and answered in context, instead of
-falling back to a generic "don't have that info" reply.
+This replaced an earlier keyword/fuzzy-token-overlap matcher used to
+pre-select context. That approach kept failing on real phrasings that didn't
+share enough vocabulary with the FAQ text it was semantically closest to -
+e.g. "about your product" scored zero against every entry and fell through
+to the generic "I don't have that information" reply, while "pricing
+details" scored just high enough against an unrelated entry to "win" and
+answer the wrong question. Sanding down the scoring function keeps just
+relocating the same class of failure to the next untested phrasing, since a
+fixed keyword/stem heuristic fundamentally can't generalize to phrasing it
+wasn't tuned against - the AI reading the full list and reasoning about it
+does generalize, so that reasoning is now the primary path.
 
-Matching considers BOTH the FAQ's question and its answer (not just the
-question), uses fuzzy/stem-tolerant token matching (so "automate" connects to
-"automation", "comply" to "compliance"), and requires a minimum relevance
-score before accepting a match at all - a single incidental shared filler
-word ("help", "project", "support" all appear in several FAQ questions) is
-not enough on its own to "win". This mirrors recommend_agent.py's matching
-fix for the same class of bug; duplicated locally rather than shared via a
-common module to keep this fix scoped to this file.
-
-A true embedding-based semantic search was considered per the original bug
-report, but isn't practical right now: Groq (the only currently-working AI
-provider - see ai_service.py) has no embeddings endpoint, and Gemini's
-embedding endpoint is unusable until its quota issue is resolved. Adding a
-local embedding model would mean a heavy new dependency (sentence-transformers
-+ torch) for a ~40-entry FAQ file. If a working embedding provider becomes
-available later, that would be a stronger long-term fix than this scoring
-approach.
+The matcher is kept, unchanged, as a fallback: if the AI call itself fails
+(get_ai_response raises), something imperfect grounded in a real match beats
+nothing when there's no AI available to reason over the full list.
 """
 import json
 import logging
@@ -103,7 +100,11 @@ def _score_faq(query_tokens: set[str], faq: dict) -> int:
 def find_best_faqs(message: str, top_n: int = 3) -> list[dict]:
     """Rank FAQ entries by fuzzy token overlap against BOTH question and
     answer content, returning only entries that clear _MIN_CONFIDENT_SCORE -
-    never an arbitrary/best-of-a-bad-lot match."""
+    never an arbitrary/best-of-a-bad-lot match.
+
+    Only used now as the AI-unavailable fallback (see get_faq_response) -
+    the normal path passes the full FAQ list to the AI instead of relying on
+    this to pre-select context."""
     query_tokens = _tokenize(message)
     if not query_tokens:
         return []
@@ -118,26 +119,37 @@ def find_best_faqs(message: str, top_n: int = 3) -> list[dict]:
     return [faq for _, faq in scored[:top_n]]
 
 
-def get_faq_response(message: str, recent_context: str | None = None) -> str:
-    matches = find_best_faqs(message)
+def _build_faq_prompt(message: str, recent_context: str | None) -> str:
+    faq_context = "\n\n".join(f"Q: {faq['question']}\nA: {faq['answer']}" for faq in _load_faqs())
+    return (
+        (f"Recent conversation so far:\n{recent_context}\n\n" if recent_context else "")
+        + f"XQORA's full FAQ list:\n{faq_context}\n\n"
+        + f"Latest user message: {message}\n\n"
+        + "Find whichever FAQ entry (or entries) above actually answers this, even if the "
+        "user's wording is quite different from the question text, and give a natural, "
+        "concise answer grounded strictly in that content. If more than one entry is "
+        "relevant, combine them naturally. If the latest message is a short reply "
+        "continuing the conversation above, answer in that context instead of treating it "
+        "as a fresh, standalone question. If nothing in the list actually covers it, say so "
+        "rather than guessing."
+    )
 
+
+def _fallback_response(message: str, recent_context: str | None) -> str:
+    """Best-effort answer via the local keyword matcher, used only when the
+    AI call itself is unavailable (see get_faq_response)."""
+    matches = find_best_faqs(message)
     if not matches and recent_context:
         matches = find_best_faqs(f"{recent_context}\n{message}")
-
     if not matches:
         return _FALLBACK_MESSAGE
+    return matches[0]["answer"]
 
-    context = "\n\n".join(f"Q: {m['question']}\nA: {m['answer']}" for m in matches)
-    prompt = (
-        (f"Recent conversation so far:\n{recent_context}\n\n" if recent_context else "")
-        + f"FAQ context:\n{context}\n\n"
-        + f"Latest user message: {message}\n\n"
-        + "Using ONLY the FAQ context above, give a natural, concise answer. If the "
-        "latest message is a short reply continuing the conversation above, answer in "
-        "that context instead of treating it as a fresh, standalone question."
-    )
+
+def get_faq_response(message: str, recent_context: str | None = None) -> str:
+    prompt = _build_faq_prompt(message, recent_context)
     try:
         return get_ai_response(prompt, system_prompt=FAQ_SYSTEM_PROMPT)
     except AIServiceError:
-        logger.warning("AI phrasing failed for FAQ; returning best-match answer directly")
-        return matches[0]["answer"]
+        logger.warning("AI FAQ call failed; falling back to keyword-matched answer")
+        return _fallback_response(message, recent_context)

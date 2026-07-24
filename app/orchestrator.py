@@ -45,9 +45,18 @@ def _build_recent_context(rows: list) -> str | None:
     return "\n".join(lines)
 
 
-def _route(db: Session, session_id: str, message: str, background_tasks: BackgroundTasks) -> tuple[str, str]:
+def _route(
+    db: Session,
+    session_id: str,
+    message: str,
+    background_tasks: BackgroundTasks,
+    skip_handler_intents: frozenset[str] = frozenset(),
+) -> tuple[str | None, str]:
     """Classify + dispatch a message that's NOT a lead-collection answer.
-    Returns (reply, intent_label) for the caller to log."""
+    Returns (reply, intent_label) for the caller to log. If the classified
+    intent is in skip_handler_intents, the handler is not invoked (reply is
+    None) - used to avoid re-running handle_lead_message when the caller
+    already ran it once for this message."""
     rows = get_recent_chat_history(db, session_id, limit=_RECENT_CONTEXT_TURNS)
     recent_context = _build_recent_context(rows)
     previous_intent = rows[-1].intent if rows else None
@@ -55,6 +64,9 @@ def _route(db: Session, session_id: str, message: str, background_tasks: Backgro
 
     if result.blocked:
         return result.refusal_message, result.intent
+
+    if result.intent in skip_handler_intents:
+        return None, result.intent
 
     handler = _ROUTES.get(result.intent, lambda *_: get_escalation_response())
     reply = handler(db, session_id, message, background_tasks, recent_context)
@@ -89,7 +101,7 @@ def handle_message(db: Session, session_id: str, message: str, background_tasks:
                 reply = _append_feedback_ask(session_id, reply)
             save_chat_history(db, session_id=session_id, message=message, response=reply, intent="lead")
             return reply
-        reply, intent_label = _route(db, session_id, message, background_tasks)
+        reply, intent_label = _route(db, session_id, message, background_tasks, skip_handler_intents={"lead"})
         if intent_label == "lead":
             combined_reply = lead_result.reply
         elif intent_label == "off_topic":
