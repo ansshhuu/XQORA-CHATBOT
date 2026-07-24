@@ -106,10 +106,7 @@ def get_recommendation_response(message: str, recent_context: str | None = None)
     matches, ambiguous = find_best_services(message)
 
     if not matches and recent_context:
-        # A short follow-up like "yeah a lot of requests" has no service
-        # keywords of its own, but the conversation it's replying to
-        # (recent_context includes the bot's own last message) usually does -
-        # retry against the combined text instead of falling back blind.
+        
         matches, ambiguous = find_best_services(f"{recent_context}\n{message}")
 
     if not matches:

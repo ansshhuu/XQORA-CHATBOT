@@ -74,9 +74,6 @@ def handle_message(db: Session, session_id: str, message: str, background_tasks:
                 db, session_id=session_id, message=message, response=feedback_result.reply, intent="feedback"
             )
             return feedback_result.reply
-        # Ignored, or moved on to something else - feedback_agent already
-        # latched this session as "declined" so it's never re-asked. Fall
-        # through and handle the message completely normally below.
 
     if feedback_agent.should_ask(session_id) and feedback_agent.is_closing_message(message):
         reply = _append_feedback_ask(session_id, CLOSING_RESPONSE)
@@ -92,22 +89,10 @@ def handle_message(db: Session, session_id: str, message: str, background_tasks:
                 reply = _append_feedback_ask(session_id, reply)
             save_chat_history(db, session_id=session_id, message=message, response=reply, intent="lead")
             return reply
-
-        # Off-flow: this message wasn't accepted as the pending field's value
-        # (e.g. a full question instead of a name). Route it like a normal
-        # message, then nudge the user back toward the still-paused field -
-        # lead_agent's session state is untouched, so the next reply retries
-        # the same field.
         reply, intent_label = _route(db, session_id, message, background_tasks)
         if intent_label == "lead":
-            # Already mid lead-flow; avoid a duplicate nudge, just resume.
             combined_reply = lead_result.reply
         elif intent_label == "off_topic":
-            # A flat off-topic refusal isn't a genuine alternate question that
-            # got answered - just return the refusal itself. Appending the
-            # resume nudge here would make it look like something real was
-            # handled when nothing was; the lead flow is still paused exactly
-            # as before (state untouched), so the next real answer resumes it.
             combined_reply = reply
         else:
             combined_reply = f"{reply}\n\n{lead_result.reply}"
@@ -118,7 +103,6 @@ def handle_message(db: Session, session_id: str, message: str, background_tasks:
     reply, intent_label = _route(db, session_id, message, background_tasks)
 
     if intent_label in ("off_topic", "greeting"):
-        # Guardrail block or greeting/empty short-circuit: no chat-history log.
         return reply
 
     if intent_label == "escalate" and feedback_agent.should_ask(session_id):

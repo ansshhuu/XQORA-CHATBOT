@@ -43,10 +43,6 @@ _CLOSING_TOKEN = (
     r"no(?:pe)?\s*that'?s\s+it|all\s+good|bye+|goodbye|see\s+ya|see\s+you|cya|"
     r"gotta\s+go|talk\s+later)"
 )
-# A message made up of ONLY closing tokens (one or more, e.g. "thanks, bye!")
-# separated by whitespace/punctuation - anchored end to end so a real
-# sentence that merely contains "thanks" ("thanks for the info, what's the
-# pricing...") is never mistaken for a sign-off.
 _CLOSING_RE = re.compile(
     rf"^\s*{_CLOSING_TOKEN}(?:\s*[,!.]*\s*{_CLOSING_TOKEN})*\s*[!.,]*\s*$",
     re.IGNORECASE,
@@ -89,11 +85,11 @@ def _extract_word_rating(stripped: str) -> int | None:
 @dataclass
 class FeedbackStepResult:
     reply: str
-    handled: bool  # True if this message was saved as feedback (rating and/or comment)
+    handled: bool  
 
 
 _lock = threading.Lock()
-# session_id -> "asked" | "declined" | "given"
+
 _feedback_state: dict[str, str] = {}
 
 
@@ -125,7 +121,6 @@ def handle_feedback_response(db: Session, session_id: str, message: str) -> Feed
     rating, remainder = _extract_rating(stripped)
 
     if rating is not None:
-        # A leading 1-5 was actually found - anything after it is the comment.
         comments = remainder or None
     else:
         word_rating = _extract_word_rating(stripped)
@@ -136,9 +131,6 @@ def handle_feedback_response(db: Session, session_id: str, message: str) -> Feed
             comments = None
 
     if rating is None and comments is None:
-        # Ignored, or moved on to something else entirely - decline for the
-        # rest of this session (never re-ask) and let the caller route this
-        # message normally instead of swallowing it.
         with _lock:
             _feedback_state[session_id] = "declined"
         return FeedbackStepResult(reply="", handled=False)

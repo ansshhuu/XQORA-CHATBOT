@@ -48,8 +48,8 @@ logger = logging.getLogger("xqora.lead_agent")
 @dataclass
 class LeadStepResult:
     reply: str
-    consumed: bool  # False when the message was off-flow and NOT accepted as the pending field's value
-    finalized: bool = False  # True only when this turn just completed and saved the lead
+    consumed: bool  
+    finalized: bool = False 
 
 
 LEAD_FIELDS = ["name", "company", "email", "phone", "message"]
@@ -168,8 +168,7 @@ def _field_matches_ai(field: str, message: str) -> bool:
     company name but don't trip any narrow rule either."""
     description = _FIELD_DESCRIPTIONS.get(field)
     if not description:
-        return True  # the free-form "message" field accepts anything
-
+        return True  
     prompt = (
         f"The user is being asked to provide: {description}.\n"
         f'Their message: "{message}"\n\n'
@@ -190,11 +189,7 @@ def _resume_nudge(field: str) -> str:
 _sessions_lock = threading.Lock()
 _sessions: dict[str, dict] = {}
 
-# Most recently completed lead's contact fields per session_id, kept
-# separately from _sessions so it survives reset_session() (called right
-# after a successful submission) - lets a second lead-collection round in the
-# same session offer to reuse them instead of re-asking from scratch. Same
-# in-memory/single-process caveat as _sessions above.
+
 _completed_leads_lock = threading.Lock()
 _completed_leads: dict[str, dict] = {}
 
@@ -323,10 +318,6 @@ def handle_lead_message(
     pending_field = state.get("_awaiting")
 
     if pending_field is None and _next_missing_field(state) == "name" and _get_completed_lead(session_id):
-        # Brand-new lead-collection trigger, but this session already
-        # completed one before (name is the first field, so it being unset
-        # means nothing has been collected yet this round) - offer to reuse
-        # those contact details instead of blindly re-asking everything.
         state["_awaiting"] = "_reuse_confirm"
         return LeadStepResult(reply=REUSE_DETAILS_PROMPT, consumed=True)
 
@@ -343,12 +334,11 @@ def handle_lead_message(
                 for field in _REUSE_FIELDS:
                     state[field] = prev.get(field)
             elif not _wants_new_details(stripped):
-                # Didn't clearly say yes or no - ask again rather than guess.
+              
                 return LeadStepResult(reply=REUSE_DETAILS_PROMPT, consumed=True)
             state["_awaiting"] = None
         elif is_bare_greeting(stripped):
-            # Too short to trip the AI check meaningfully, and obviously not
-            # a real field value regardless.
+            
             return LeadStepResult(reply=_resume_nudge(pending_field), consumed=False)
 
         elif pending_field in ("email", "phone"):
@@ -361,21 +351,14 @@ def handle_lead_message(
                 state[pending_field] = sanitize_input(extracted, 500)
                 state["_awaiting"] = None
             elif not _looks_off_flow_heuristic(pending_field, stripped):
-                # Doesn't pass strict format validation, but plausibly IS an
-                # attempt at one (e.g. a typo) - re-ask, don't reroute. Uses
-                # the heuristic (not the AI check) here: email/phone already
-                # have a strict regex as the format gate, so the heuristic's
-                # narrow signals (@ presence, digit count) are the right bar
-                # for "off-flow or not" - the AI check can call something
-                # like "not-an-email" implausible even though it's clearly a
-                # bad-format attempt at the field, not a different topic.
+                
                 return LeadStepResult(reply=VALIDATION_PROMPTS[pending_field], consumed=True)
             else:
                 return LeadStepResult(reply=_resume_nudge(pending_field), consumed=False)
         elif pending_field == "message":
             state["message"] = sanitize_input(stripped, 500)
             state["_awaiting"] = None
-        else:  # name, company
+        else:  
             if not _field_matches_ai(pending_field, stripped):
                 return LeadStepResult(reply=_resume_nudge(pending_field), consumed=False)
             state[pending_field] = sanitize_input(stripped, 500)

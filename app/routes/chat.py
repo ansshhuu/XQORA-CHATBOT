@@ -13,9 +13,7 @@ from app.orchestrator import handle_message
 router = APIRouter()
 
 _RATE_WINDOW_SECONDS = 60
-# In-memory per-process limiter (key -> recent request timestamps). Fine for a
-# single-instance deployment; a multi-worker/multi-instance deployment would
-# need a shared store (e.g. Redis) instead.
+
 _request_log: dict[str, deque] = defaultdict(deque)
 
 
@@ -55,9 +53,6 @@ def handle_chat(
     db: Session = Depends(get_db),
 ):
     session_id = request.session_id or str(uuid.uuid4())
-    # Keyed on IP alone, not IP+session: session_id is client-supplied and a
-    # fresh UUID is minted whenever it's omitted, so keying on the pair would
-    # let spam bypass the limiter simply by never sending a session_id.
     client_ip = http_request.client.host if http_request.client else "unknown"
     _enforce_rate_limit(client_ip)
 

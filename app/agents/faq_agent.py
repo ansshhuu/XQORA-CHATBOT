@@ -43,12 +43,7 @@ _STOPWORDS = {
     "xqora", "with", "about",
 }
 
-# A confident match needs more than one incidental shared word (see module
-# docstring bug writeup: "support"/"help"/"project" alone each falsely
-# "matched" an unrelated FAQ before). Question-token matches count double
-# (the question defines what the FAQ is actually about) so one solid
-# question-level match plus anything else in the answer is enough; two
-# generic answer-only overlaps are not.
+
 _MIN_CONFIDENT_SCORE = 3
 
 _FALLBACK_MESSAGE = (
@@ -127,10 +122,6 @@ def get_faq_response(message: str, recent_context: str | None = None) -> str:
     matches = find_best_faqs(message)
 
     if not matches and recent_context:
-        # A short follow-up ("what about the paid ones?") may have no FAQ
-        # keywords of its own; retry against the combined text so the prior
-        # topic (recent_context includes the bot's own last message) anchors
-        # the match instead of falling back blind.
         matches = find_best_faqs(f"{recent_context}\n{message}")
 
     if not matches:

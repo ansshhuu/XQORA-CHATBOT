@@ -14,13 +14,7 @@ logger = logging.getLogger("xqora.lead_service")
 
 resend.api_key = RESEND_API_KEY
 
-# The resend SDK has no timeout parameter anywhere (Emails.send() calls
-# requests.request() internally with none, and there's no global config hook
-# either), so a stalled connection to Resend could otherwise hang forever.
-# Enforced here at the application level instead, since the SDK gives us no
-# other option. This is called from lead_agent's background task, so a
-# timeout here only delays marking the lead "forwarded" - it never touches
-# the user-facing chat response either way.
+
 _SEND_TIMEOUT_SECONDS = 10
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="resend-send")
 
