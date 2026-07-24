@@ -1,0 +1,52 @@
+{
+  "services": [
+    {
+      "id": "website-development",
+      "name": "Website Development",
+      "description": "Custom, responsive websites and web applications built with modern technologies such as HTML, CSS, JavaScript, React, Node.js, Python, and FastAPI.",
+      "keywords": ["website", "web app", "web application", "landing page", "portfolio site", "e-commerce", "online store", "web design", "web redesign", "cms", "site"]
+    },
+    {
+      "id": "software-development",
+      "name": "Software Development",
+      "description": "Custom software solutions including internal business tools like ERP, CRM, inventory management systems, and HR portals, tailored to business needs.",
+      "keywords": ["software", "custom software", "erp", "crm", "inventory system", "hr portal", "business tool", "internal tool", "desktop application", "system", "platform", "custom solution"]
+    },
+    {
+      "id": "ai-automation",
+      "name": "AI Automation & Chatbots",
+      "description": "AI-powered chatbots, customer support assistants, business process automation, document processing, and workflow automation tailored to business needs.",
+      "keywords": ["ai", "artificial intelligence", "chatbot", "chat bot", "bot", "automate", "automation", "automating", "workflow", "workflow automation", "document processing", "ai assistant", "process automation", "ai solution", "customer support automation", "auto reply"]
+    },
+    {
+      "id": "cloud-solutions",
+      "name": "Cloud Solutions",
+      "description": "Cloud deployment, migration, and infrastructure management on AWS, Microsoft Azure, and Google Cloud, including scaling and cost optimization.",
+      "keywords": ["cloud", "aws", "azure", "google cloud", "host", "hosting", "deployment", "deploy", "migration", "server", "server setup", "cloud infrastructure", "scaling", "infrastructure"]
+    },
+    {
+      "id": "mobile-app-development",
+      "name": "Mobile App Development",
+      "description": "Android, iOS, and cross-platform mobile applications tailored to business requirements.",
+      "keywords": ["mobile app", "android app", "ios app", "app development", "cross-platform app", "mobile application", "app", "mobile", "android", "ios"]
+    },
+    {
+      "id": "technical-support",
+      "name": "Technical Support & Maintenance",
+      "description": "Post-project support, bug fixes, security updates, performance improvements, and feature enhancements under agreed support plans.",
+      "keywords": ["maintenance", "bug fix", "technical support", "downtime", "upgrade", "patch", "monitoring", "fix a bug", "broken", "not working"]
+    },
+    {
+      "id": "student-it-projects",
+      "name": "Student & Academic IT Projects",
+      "description": "Guidance and development support for student and academic IT projects, including technical mentorship.",
+      "keywords": ["student project", "academic project", "college project", "final year project", "mini project"]
+    },
+    {
+      "id": "internship",
+      "name": "Internship Program",
+      "description": "Internship opportunities for students and recent graduates to gain hands-on experience across XQORA's service areas.",
+      "keywords": ["internship", "intern", "trainee", "job opportunity", "career"]
+    }
+  ]
+}

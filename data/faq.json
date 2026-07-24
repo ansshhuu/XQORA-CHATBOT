@@ -1,0 +1,188 @@
+{
+  "faqs": [
+    {
+      "question": "What services does XQORA provide?",
+      "answer": "XQORA provides Website Development, Software Development, AI Solutions, AI Automation, Cloud Services, Technical Support, Mobile App Development, Digital Solutions, Student IT Projects, and Internship programs."
+    },
+    {
+      "question": "Who is the founder of XQORA Technologies?",
+      "answer": "XQORA was founded by Manas Chandrakant Mhatre, who serves as CEO. He brings deep experience in software engineering, enterprise architecture, and technological innovation, with a focus on quality, technical expertise, and long-term client partnerships."
+    },
+    {
+      "question": "Where is XQORA Technologies located?",
+      "answer": "XQORA is based in Uran, Navi Mumbai."
+    },
+    {
+      "question": "What are XQORA's working hours?",
+      "answer": "Monday to Friday, 9:00 AM to 6:00 PM (local time)."
+    },
+    {
+      "question": "What is the duration of XQORA's internship?",
+      "answer": "The internship duration is typically 4 months, depending on the role and project requirements."
+    },
+    {
+      "question": "Is the XQORA internship paid or unpaid?",
+      "answer": "The internship may be paid or unpaid depending on the role, candidate's performance, and company requirements. Details are shared during the selection process."
+    },
+    {
+      "question": "Who is eligible to apply for the internship?",
+      "answer": "Students and recent graduates with relevant skills and a willingness to learn are eligible to apply. A basic understanding of the technologies related to the role is expected."
+    },
+    {
+      "question": "How can I apply for an internship at XQORA?",
+      "answer": "You can apply by sending your resume through our official recruitment process or by contacting us via our official email when internship openings are announced."
+    },
+    {
+      "question": "What is XQORA's contact email and phone number?",
+      "answer": "Email: xqoratechnologies@gmail.com | Phone: +91 89280 39598"
+    },
+    {
+      "question": "How does a project start with XQORA?",
+      "answer": "A project begins with an initial discussion to understand the client's requirements. We then prepare a suitable solution, finalize the scope, timeline, and cost, and begin development after approval."
+    },
+    {
+      "question": "What happens after project completion? Does XQORA provide support?",
+      "answer": "Yes. XQORA provides post-project support, bug fixes, and maintenance as per the agreed support terms. Additional feature enhancements can also be developed based on client requirements."
+    },
+    {
+      "question": "Which technologies does XQORA use for web development?",
+      "answer": "XQORA uses modern technologies such as HTML, CSS, JavaScript, React, Node.js, Python, FastAPI, MySQL, cloud platforms, and others based on project requirements."
+    },
+    {
+      "question": "How much does website development cost?",
+      "answer": "The cost depends on the project's complexity, features, design requirements, and timeline. After understanding your requirements, we provide a customized quotation."
+    },
+    {
+      "question": "What kind of AI automation solutions does XQORA build?",
+      "answer": "XQORA develops AI-powered chatbots, customer support assistants, business process automation solutions, document processing systems, workflow automation, and other AI solutions tailored to business needs."
+    },
+    {
+      "question": "Can XQORA build a custom AI chatbot for my business?",
+      "answer": "Yes. XQORA can develop custom AI chatbots based on your business requirements. These chatbots can assist with customer support, lead generation, FAQs, appointment booking, and other business-specific tasks."
+    },
+    {
+      "question": "Does XQORA help with web hosting, domain setup, and cloud deployment?",
+      "answer": "Yes. XQORA can assist with domain registration, web hosting setup, SSL certificate configuration, business email setup, and cloud deployment. We help you choose the most suitable solution based on your business requirements and budget."
+    },
+    {
+      "question": "What payment schedule or structure does XQORA follow?",
+      "answer": "Our payment structure depends on the project size and scope. Typically, projects are divided into milestones, such as an initial advance before development begins, milestone-based payments during development, and the remaining balance upon project completion. All payment terms are clearly discussed before the project starts."
+    },
+    {
+      "question": "How will I stay updated on the progress of my project during development?",
+      "answer": "We believe in transparent communication. Clients receive regular progress updates through scheduled meetings, email, WhatsApp, or project management tools. Major milestones are demonstrated for review before moving to the next phase."
+    },
+    {
+      "question": "Can you redesign my existing website instead of building a new one?",
+      "answer": "Yes. We can redesign and modernize your existing website while preserving important content and functionality. If rebuilding is the better long-term option, we'll recommend that approach."
+    },
+    {
+      "question": "Can I request changes during the development process?",
+      "answer": "Yes. Minor revisions within the agreed scope are generally accommodated. Significant changes or additional features may require updates to the project timeline and cost, which will always be discussed in advance."
+    },
+    {
+      "question": "Can the software be designed to grow as my business expands?",
+      "answer": "Absolutely. We aim to build scalable solutions that can support future users, features, integrations, and increased business growth."
+    },
+    {
+      "question": "Will I be able to request new features later after the project is delivered?",
+      "answer": "Yes. We provide enhancement and feature development services whenever your business needs evolve."
+    },
+    {
+      "question": "How do you handle updates, bug fixes, and maintenance?",
+      "answer": "We offer post-launch support and maintenance based on the agreed support plan, including bug fixes, security updates, performance improvements, and feature enhancements."
+    },
+    {
+      "question": "What happens if I do not know the technical details?",
+      "answer": "That's completely fine. Our team explains everything in simple, non-technical language and guides you throughout the project."
+    },
+    {
+      "question": "Why should I choose XQORA?",
+      "answer": "XQORA combines modern technology, AI-driven solutions, and a client-focused approach to deliver practical, scalable digital solutions while maintaining transparency and long-term relationships."
+    },
+    {
+      "question": "How easy is it for us to update the chatbot's knowledge base when our services or pricing change?",
+      "answer": "Our chatbot solutions are designed so that services, pricing, FAQs, and other business information can be updated without rebuilding the entire chatbot."
+    },
+    {
+      "question": "Do you offer a free consultation, discovery call, or project assessment?",
+      "answer": "Yes. We provide an initial consultation to understand your goals, discuss your requirements, and recommend suitable solutions before development begins."
+    },
+    {
+      "question": "Can XQORA assist with domain registration, SSL certificates, and setting up corporate email accounts?",
+      "answer": "Yes. We assist with domain registration, DNS configuration, SSL certificates, professional email setup, and secure deployment."
+    },
+    {
+      "question": "How does XQORA handle database backups and disaster recovery for software projects?",
+      "answer": "Where applicable, we implement backup strategies and recovery mechanisms based on project requirements, including automated backups and recovery planning where appropriate."
+    },
+    {
+      "question": "How do XQORA's custom AI solutions comply with privacy regulations like GDPR or Indian DPDP?",
+      "answer": "We build AI solutions with privacy and security in mind. Where applicable, we support practices aligned with GDPR and India's DPDP Act. Specific compliance measures depend on the project's scope and applicable legal requirements."
+    },
+    {
+      "question": "Does XQORA develop mobile applications along with websites and software?",
+      "answer": "Yes. XQORA develops responsive websites, custom software solutions, and mobile applications tailored to business requirements, including Android, iOS, and cross-platform applications."
+    },
+    {
+      "question": "Can XQORA build custom internal business tools like ERP, CRM, or inventory systems?",
+      "answer": "Yes. We design and develop customized ERP, CRM, inventory management systems, HR portals, and other internal business applications based on client needs."
+    },
+    {
+      "question": "Does XQORA provide source code and documentation after project delivery?",
+      "answer": "Source code ownership and delivery depend on the project agreement. For projects where source code transfer is included, XQORA provides the agreed deliverables after all contractual payments are completed. For solutions built using XQORA's proprietary frameworks, reusable components, or licensed technologies, we provide the agreed solution and access while retaining ownership of our proprietary intellectual property. All ownership terms are clearly defined before the project begins."
+    },
+    {
+      "question": "Can XQORA integrate existing systems or third-party APIs into new software?",
+      "answer": "Yes. We integrate payment gateways, WhatsApp, Google services, CRMs, cloud storage, email services, and other third-party APIs as required."
+    },
+    {
+      "question": "Can XQORA migrate an existing on-premise system to the cloud?",
+      "answer": "Yes. We help businesses securely migrate applications and databases to cloud platforms with minimal downtime."
+    },
+    {
+      "question": "Does XQORA set up and configure cloud servers for businesses?",
+      "answer": "Yes. We deploy and configure cloud infrastructure on AWS, Microsoft Azure, Google Cloud, and other providers based on project requirements."
+    },
+    {
+      "question": "Does XQORA offer cloud infrastructure that scales with growing traffic?",
+      "answer": "Yes. Our cloud solutions are designed to scale as your business grows while maintaining performance and reliability."
+    },
+    {
+      "question": "Does XQORA help optimize or monitor ongoing cloud costs?",
+      "answer": "Yes. We help optimize cloud resources, monitor usage, and recommend cost-effective configurations."
+    },
+    {
+      "question": "How do I report a bug after project delivery?",
+      "answer": "You can report bugs through our official support email or designated communication channel. Eligible issues are resolved according to the agreed support plan."
+    },
+    {
+      "question": "Does XQORA provide emergency support for critical downtime?",
+      "answer": "Yes. Clients covered under maintenance or support agreements receive priority assistance for critical issues."
+    },
+    {
+      "question": "Does XQORA offer full-time job opportunities besides internships?",
+      "answer": "Yes. As XQORA grows, full-time opportunities will be offered based on business requirements."
+    },
+    {
+      "question": "Can a good-performing intern get converted to a full-time role?",
+      "answer": "Yes. High-performing interns may be considered for full-time roles depending on performance and available positions."
+    },
+    {
+      "question": "Does XQORA work with international clients?",
+      "answer": "Yes. We work with clients globally through remote collaboration and digital project management."
+    },
+    {
+      "question": "Will my business idea or project details be kept confidential (NDA)?",
+      "answer": "Yes. We respect client confidentiality and can sign a Non-Disclosure Agreement (NDA) before project discussions whenever required."
+    },
+    {
+      "question": "What is XQORA's refund or cancellation policy?",
+      "answer": "Refunds and cancellations are handled according to the project agreement. Since most projects involve customized development, completed milestones are generally non-refundable unless otherwise stated in the contract."
+    },
+    {
+      "question": "Does XQORA take up student or academic IT projects?",
+      "answer": "Yes. XQORA takes up student and academic IT projects, helping students with project development, guidance, and technical support."
+    }
+  ]
+}
