@@ -1,8 +1,6 @@
 # XQORA Chatbot
 
-Backend API and embeddable widget powering the AI customer support chatbot for the
-XQORA Technologies website. It answers questions about XQORA's services, recommends
-the right offering, collects leads, escalates complex queries to the team, and
+AI customer support chatbot for theXQORA Technologies website. It answers questions about XQORA's services, recommends the right offering, collects leads, escalates complex queries to the team, and
 collects feedback reducing manual support load and improving lead quality.
 
 Built with FastAPI and a lightweight JavaScript widget, using a multi-agent
@@ -190,7 +188,7 @@ python tests/test_e2e.py --mocked
   length) is applied to every user-supplied value before it's persisted — chat messages/
   responses in `save_chat_history`, and every lead field in `lead_agent.py` before it's
   written to the `Leads` table.
-- **`.env` is gitignored** (along with `*.db`, `venv/`, and `.claude/`) — double-checked
+- **`.env` is gitignored** (along with `*.db`, `venv/`) double-checked
   no API keys are hardcoded anywhere in tracked files.
 
 
