@@ -29,7 +29,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.main import app  # noqa: E402
 from app.agents import faq_agent, feedback_agent, lead_agent, recommend_agent  # noqa: E402
 from app.agents.intent_agent import classify_intent, hard_escalate_signal, _is_unrelated_professional_service  # noqa: E402
-from app.database import ChatHistory, Feedback, Lead, SessionLocal, engine  # noqa: E402
+from app.database import ChatHistory, Feedback, Lead, SessionLocal, engine, load_lead_session  # noqa: E402
 from app.orchestrator import handle_message  # noqa: E402
 from app.prompt import (  # noqa: E402
     BARE_CATEGORY_RESPONSE,
@@ -1243,6 +1243,226 @@ def _feedback_ignored_does_not_loop_or_misfire():
     lead_agent.reset_session(session_id)
 
 
+def _feature_lead_session_db_persistence():
+    """In-progress lead state must be loaded from/saved to the lead_sessions
+    table on every turn, not held purely in server memory - so a server
+    restart mid-form doesn't lose it. A real process restart is simulated
+    here by clearing lead_agent's in-memory session cache (and its
+    per-session lock) between turns - that's exactly the state a fresh
+    process actually starts with, so if the flow still resumes correctly
+    afterward, it proves the DB read-through fallback (not just the
+    in-memory dict) is what's carrying the state."""
+    session_id = "regression-lead-session-db-persistence"
+    lead_agent.reset_session(session_id)
+
+    db = SessionLocal()
+    try:
+        bg = BackgroundTasks()
+        with patch("app.agents.lead_agent.get_ai_response", return_value="YES"):
+            r1 = lead_agent.handle_lead_message(db, session_id, "I want to start a project and get a quote", bg)
+            check("DB persistence: lead flow starts, asking for name", "name" in r1.reply.lower(), r1.reply)
+
+            r2 = lead_agent.handle_lead_message(db, session_id, "Jordan Lee", bg)
+            check("DB persistence: name accepted, asking for company", "company" in r2.reply.lower(), r2.reply)
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        persisted = load_lead_session(db, session_id)
+    finally:
+        db.close()
+    check(
+        "DB persistence: partial state (name) landed in the lead_sessions table, not just memory",
+        persisted is not None and persisted["name"] == "Jordan Lee" and persisted["_awaiting"] == "company",
+        persisted,
+    )
+
+    # Simulate a server restart: wipe the in-memory cache + its lock (this
+    # is literally what a fresh process starts with), then continue the
+    # SAME session - it must resume from "company", not restart from "name".
+    with lead_agent._sessions_lock:
+        lead_agent._sessions.pop(session_id, None)
+    with lead_agent._session_locks_lock:
+        lead_agent._session_locks.pop(session_id, None)
+
+    db = SessionLocal()
+    try:
+        bg = BackgroundTasks()
+        with patch("app.agents.lead_agent.get_ai_response", return_value="YES"):
+            r3 = lead_agent.handle_lead_message(db, session_id, "Acme Rockets", bg)
+    finally:
+        db.close()
+    check(
+        "DB persistence: after a simulated restart, flow resumes from DB state (asks for email, not name again)",
+        "email" in r3.reply.lower() and "name" not in r3.reply.lower(),
+        r3.reply,
+    )
+
+    with lead_agent._sessions_lock:
+        state_after = dict(lead_agent._sessions.get(session_id) or {})
+    check(
+        "DB persistence: reloaded state kept the name captured before the simulated restart",
+        state_after.get("name") == "Jordan Lee" and state_after.get("company") == "Acme Rockets",
+        state_after,
+    )
+
+    lead_agent.reset_session(session_id)
+    db = SessionLocal()
+    try:
+        cleared = load_lead_session(db, session_id)
+    finally:
+        db.close()
+    check("DB persistence: reset_session also clears the persisted row", cleared is None, cleared)
+
+
+def _feature_session_isolation_concurrent_leads():
+    """Two different sessions collecting leads, with turns interleaved (A,
+    B, A, B, ...) rather than run back-to-back, must never see or overwrite
+    each other's data - every lookup of session state (in-memory cache AND
+    the lead_sessions DB table) is keyed strictly by session_id, never a
+    shared/global variable. Interleaving is what would actually expose a
+    keying bug if one existed - running the two flows sequentially wouldn't
+    catch one session's data leaking into a still-open other session."""
+    session_a = "regression-isolation-a"
+    session_b = "regression-isolation-b"
+    lead_agent.reset_session(session_a)
+    lead_agent.reset_session(session_b)
+
+    db = SessionLocal()
+    try:
+        bg = BackgroundTasks()
+        with patch("app.agents.lead_agent.get_ai_response", return_value="YES"):
+            lead_agent.handle_lead_message(db, session_a, "I want to start a project and get a quote", bg)
+            lead_agent.handle_lead_message(db, session_b, "I want to start a project and get a quote", bg)
+
+            lead_agent.handle_lead_message(db, session_a, "Alice Anderson", bg)
+            lead_agent.handle_lead_message(db, session_b, "Bob Brown", bg)
+
+            lead_agent.handle_lead_message(db, session_a, "Alpha Inc", bg)
+            lead_agent.handle_lead_message(db, session_b, "Beta LLC", bg)
+    finally:
+        db.close()
+
+    with lead_agent._sessions_lock:
+        state_a = dict(lead_agent._sessions.get(session_a) or {})
+        state_b = dict(lead_agent._sessions.get(session_b) or {})
+
+    check(
+        "Isolation: session A kept its own name/company, unaffected by session B's interleaved turns",
+        state_a.get("name") == "Alice Anderson" and state_a.get("company") == "Alpha Inc",
+        state_a,
+    )
+    check(
+        "Isolation: session B kept its own name/company, unaffected by session A's interleaved turns",
+        state_b.get("name") == "Bob Brown" and state_b.get("company") == "Beta LLC",
+        state_b,
+    )
+
+    db = SessionLocal()
+    try:
+        persisted_a = load_lead_session(db, session_a)
+        persisted_b = load_lead_session(db, session_b)
+    finally:
+        db.close()
+    check(
+        "Isolation: persisted lead_sessions rows are also kept separate per session_id",
+        persisted_a is not None
+        and persisted_a["name"] == "Alice Anderson"
+        and persisted_b is not None
+        and persisted_b["name"] == "Bob Brown",
+        (persisted_a, persisted_b),
+    )
+
+    lead_agent.reset_session(session_a)
+    lead_agent.reset_session(session_b)
+
+
+def _feature_sheets_and_email_forward_failure_isolation():
+    """The email forward and the Google Sheets row append run in the same
+    background job (lead_agent._forward_lead_async) but must be fully
+    independent: a failure in either one must never stop the other from
+    being attempted, and must never affect the lead already saved to the
+    Leads table. Checked in both directions with real Lead rows (not just
+    mocked function calls), so "lead.forwarded still gets set" is a real
+    DB assertion, not just "the mock was called"."""
+    db = SessionLocal()
+    try:
+        lead1 = Lead(
+            session_id="regression-sheets-fails-email-ok",
+            name="Sheets Failure Test",
+            company="Acme Inc",
+            email="sheetsfail@example.com",
+            phone="+15551230000",
+            message="test need one",
+        )
+        db.add(lead1)
+        db.commit()
+        db.refresh(lead1)
+        lead1_id = lead1.id
+    finally:
+        db.close()
+
+    with patch("app.agents.lead_agent.forward_lead", return_value=True) as mock_email, patch(
+        "app.agents.lead_agent.append_lead_row", side_effect=Exception("bad sheet id")
+    ) as mock_sheets:
+        lead_agent._forward_lead_async(
+            lead1_id, "Sheets Failure Test", "Acme Inc", "sheetsfail@example.com", "+15551230000", "test need one"
+        )
+
+    check("Sheets fails / email ok: email forward was still attempted", mock_email.called, None)
+    check("Sheets fails / email ok: sheets append was attempted despite raising", mock_sheets.called, None)
+
+    db = SessionLocal()
+    try:
+        refreshed1 = db.get(Lead, lead1_id)
+    finally:
+        db.close()
+    check(
+        "Sheets fails / email ok: lead.forwarded still set True - a Sheets failure didn't roll it back",
+        refreshed1 is not None and refreshed1.forwarded is True,
+        refreshed1,
+    )
+
+    db = SessionLocal()
+    try:
+        lead2 = Lead(
+            session_id="regression-email-fails-sheets-ok",
+            name="Email Failure Test",
+            company="Beta LLC",
+            email="emailfail@example.com",
+            phone="+15559990000",
+            message="test need two",
+        )
+        db.add(lead2)
+        db.commit()
+        db.refresh(lead2)
+        lead2_id = lead2.id
+    finally:
+        db.close()
+
+    with patch(
+        "app.agents.lead_agent.forward_lead", side_effect=Exception("resend down")
+    ) as mock_email2, patch("app.agents.lead_agent.append_lead_row", return_value=True) as mock_sheets2:
+        lead_agent._forward_lead_async(
+            lead2_id, "Email Failure Test", "Beta LLC", "emailfail@example.com", "+15559990000", "test need two"
+        )
+
+    check("Email fails / sheets ok: email forward was attempted despite raising", mock_email2.called, None)
+    check("Email fails / sheets ok: sheets append was still attempted", mock_sheets2.called, None)
+
+    db = SessionLocal()
+    try:
+        refreshed2 = db.get(Lead, lead2_id)
+    finally:
+        db.close()
+    check(
+        "Email fails / sheets ok: lead.forwarded stays False (email genuinely failed), but no exception propagated",
+        refreshed2 is not None and refreshed2.forwarded is False,
+        refreshed2,
+    )
+
+
 def run_mocked_tests():
     TEST_DB_PATH_MOCKED = TEST_DB_PATH
     if os.path.exists(TEST_DB_PATH_MOCKED):
@@ -1261,6 +1481,9 @@ def run_mocked_tests():
     _bug_check_in_and_trivia_misclassification()
     _bug6_faq_recommend_full_list_grounding()
     _feature_reuse_lead_details()
+    _feature_lead_session_db_persistence()
+    _feature_session_isolation_concurrent_leads()
+    _feature_sheets_and_email_forward_failure_isolation()
 
     _feedback_response_parsing_unit()
     feedback_session = _feedback_after_lead_submission()

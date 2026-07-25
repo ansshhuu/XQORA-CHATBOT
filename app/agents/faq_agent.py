@@ -44,8 +44,9 @@ _STOPWORDS = {
 _MIN_CONFIDENT_SCORE = 3
 
 _FALLBACK_MESSAGE = (
-    "I don't have that information on hand. Please reach out to our team "
-    "directly at xqoratechnologies@gmail.com for more details."
+    "That's not something we handle. XQORA focuses on website and software development, "
+    "AI automation and chatbots, cloud solutions, mobile apps, and technical support, so "
+    "reach out at xqoratechnologies@gmail.com if you want to dig into anything specific."
 )
 
 
@@ -130,8 +131,9 @@ def _build_faq_prompt(message: str, recent_context: str | None) -> str:
         "concise answer grounded strictly in that content. If more than one entry is "
         "relevant, combine them naturally. If the latest message is a short reply "
         "continuing the conversation above, answer in that context instead of treating it "
-        "as a fresh, standalone question. If nothing in the list actually covers it, say so "
-        "rather than guessing."
+        "as a fresh, standalone question. If nothing in the list actually covers it, say "
+        "plainly and confidently that XQORA doesn't offer that and briefly mention what "
+        "XQORA does instead, rather than guessing."
     )
 
 

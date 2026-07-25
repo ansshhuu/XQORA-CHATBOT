@@ -1,7 +1,8 @@
 """
 Lead agent: collects lead details step-by-step across turns, tracked per
 session_id, then saves to the Leads table and forwards asynchronously via
-lead_service (doesn't block the chat response on the email send).
+lead_service (email) and sheets_service (Google Sheets row) - doesn't block
+the chat response on either send.
 
 Only collects name, company (optional), email, phone, and a short need
 description. No budget or service-fit discussion here, that's handled by
@@ -25,23 +26,41 @@ resumes from wherever it paused rather than restarting.
 Users can also bail out of collection entirely at any step ("never mind",
 "cancel", "stop") - see _is_cancel_request.
 
-Session progress is held in an in-memory dict, keyed by session_id. That's
-fine for a single-process deployment; a multi-worker/multi-instance deployment
-would need a shared store (e.g. Redis) instead.
+Session progress is held in an in-memory dict, keyed by session_id, for fast
+same-process access - but that dict is only a cache now, not the source of
+truth: every mutating turn also persists the state to the lead_sessions
+table (see _persist_session / database.save_lead_session), and a cache miss
+(fresh session, or a session that predates this process - e.g. right after a
+restart) reads it back from there (see _get_session / database.load_lead_session)
+instead of starting over. That's what makes an in-progress form survive a
+server restart. A multi-worker/multi-instance deployment would still need a
+shared cache (e.g. Redis) in front of the DB to avoid every request round-
+tripping to it, but correctness no longer depends on the in-memory dict
+surviving.
 """
 import logging
 import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.core.config import SESSION_TTL_SECONDS
-from app.database import Lead, SessionLocal, sanitize_input
+from app.database import (
+    Lead,
+    SessionLocal,
+    delete_lead_session,
+    delete_stale_lead_sessions,
+    load_lead_session,
+    sanitize_input,
+    save_lead_session,
+)
 from app.services.ai_service import AIServiceError, get_ai_response
 from app.services.lead_service import forward_lead
+from app.services.sheets_service import append_lead_row
 from app.utils import is_bare_greeting
 
 logger = logging.getLogger("xqora.lead_agent")
@@ -223,7 +242,14 @@ def _sweep_expired_sessions(now: float) -> None:
     SESSION_TTL_SECONDS, so a long-running instance doesn't accumulate one
     entry per visitor forever. Runs at most once per _SWEEP_INTERVAL_SECONDS,
     triggered opportunistically off real traffic (see is_collecting below)
-    rather than a background thread/timer."""
+    rather than a background thread/timer.
+
+    Also clears matching rows out of the lead_sessions table, on the same
+    cadence but keyed off the DB's own updated_at column rather than the
+    in-memory touch times - that way an abandoned form from BEFORE this
+    process started (so it was never touched in this process's _last_touch
+    at all) still eventually gets cleaned up, not just ones evicted from the
+    in-memory cache this run."""
     global _last_sweep
     with _touch_lock:
         if now - _last_sweep < _SWEEP_INTERVAL_SECONDS:
@@ -233,23 +259,64 @@ def _sweep_expired_sessions(now: float) -> None:
         for sid in expired:
             del _last_touch[sid]
 
-    if not expired:
-        return
-    with _sessions_lock:
-        for sid in expired:
-            _sessions.pop(sid, None)
-    with _completed_leads_lock:
-        for sid in expired:
-            _completed_leads.pop(sid, None)
-    with _session_locks_lock:
-        for sid in expired:
-            _session_locks.pop(sid, None)
+    if expired:
+        with _sessions_lock:
+            for sid in expired:
+                _sessions.pop(sid, None)
+        with _completed_leads_lock:
+            for sid in expired:
+                _completed_leads.pop(sid, None)
+        with _session_locks_lock:
+            for sid in expired:
+                _session_locks.pop(sid, None)
+
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=SESSION_TTL_SECONDS)
+        delete_stale_lead_sessions(db, cutoff)
+    except Exception:
+        logger.exception("Stale lead_sessions cleanup failed")
+    finally:
+        db.close()
 
 
 def _get_session(session_id: str) -> dict:
+    """In-memory session state for the current process. On a cache miss,
+    falls back to the persisted lead_sessions row (see database.py) before
+    defaulting to a blank state - this is what lets an in-progress form
+    resume correctly after a restart wiped the in-memory cache. Callers that
+    mutate the returned dict are responsible for persisting the change via
+    _persist_session using their own request-scoped db session; this
+    function only needs a short-lived connection of its own for the (
+    uncommon) read-through fallback."""
     _touch(session_id)
     with _sessions_lock:
-        return _sessions.setdefault(session_id, {field: None for field in LEAD_FIELDS})
+        state = _sessions.get(session_id)
+        if state is not None:
+            return state
+
+    db = SessionLocal()
+    try:
+        loaded = load_lead_session(db, session_id)
+    finally:
+        db.close()
+
+    state = {field: None for field in LEAD_FIELDS}
+    if loaded:
+        for field in LEAD_FIELDS:
+            state[field] = loaded.get(field)
+        state["_awaiting"] = loaded.get("_awaiting")
+
+    with _sessions_lock:
+        return _sessions.setdefault(session_id, state)
+
+
+def _persist_session(db: Session, session_id: str, state: dict) -> None:
+    """Saves the current in-progress state to the lead_sessions table using
+    the caller's request-scoped db session. Called on every turn that
+    mutates `state`, so a restart between turns never loses more than the
+    single in-flight message."""
+    save_lead_session(db, session_id, state)
 
 
 def reset_session(session_id: str) -> None:
@@ -259,6 +326,12 @@ def reset_session(session_id: str) -> None:
         _session_locks.pop(session_id, None)
     with _touch_lock:
         _last_touch.pop(session_id, None)
+
+    db = SessionLocal()
+    try:
+        delete_lead_session(db, session_id)
+    finally:
+        db.close()
 
 
 def _store_completed_lead(session_id: str, state: dict) -> None:
@@ -282,11 +355,25 @@ def is_collecting(session_id: str) -> bool:
     Called on every turn by the orchestrator regardless of session, which
     also makes it a convenient place to piggyback the TTL sweep so expired
     session state gets cleaned up off ordinary traffic.
+
+    Checked against the in-memory cache first; on a miss, falls back to the
+    persisted lead_sessions row so a form still mid-collection when the
+    server restarted is correctly recognized as such on the very next
+    message, instead of that message being misrouted through normal intent
+    classification because the in-memory cache came back empty.
     """
     _sweep_expired_sessions(time.monotonic())
     with _sessions_lock:
         state = _sessions.get(session_id)
-        return bool(state and state.get("_awaiting"))
+    if state is not None:
+        return bool(state.get("_awaiting"))
+
+    db = SessionLocal()
+    try:
+        loaded = load_lead_session(db, session_id)
+    finally:
+        db.close()
+    return bool(loaded and loaded.get("_awaiting"))
 
 
 def _next_missing_field(state: dict) -> str | None:
@@ -319,24 +406,38 @@ def _validate_phone(value: str) -> bool:
     return bool(_PHONE_VALIDATE_RE.match(_normalize_phone(value)))
 
 
-def _forward_lead_async(lead_id: int, name: str, contact: str, need: str) -> None:
+def _forward_lead_async(lead_id: int, name: str, company: str, email: str, phone: str, need: str) -> None:
+    """Fire-and-forget background job for a just-completed lead: forwards it
+    to the team by email, and appends it as a row to the shared Google
+    Sheet. The two are independent - a Sheets failure (bad sheet ID,
+    revoked/misconfigured credentials, network error) must never stop the
+    email from going out, and an email failure must never stop the Sheets
+    row, so each is wrapped in its own try/except rather than one failure
+    short-circuiting the other. (Both forward_lead and append_lead_row
+    already catch their own errors internally and return a bool rather than
+    raising - the try/except here is defense in depth, not the primary
+    safety net.)"""
+    contact = email or phone or ""
     try:
         ok = forward_lead(name, contact, need)
     except Exception:
-        logger.exception("Lead forward failed for lead_id=%s", lead_id)
-        return
+        logger.exception("Lead forward (email) failed for lead_id=%s", lead_id)
+        ok = False
 
-    if not ok:
-        return
+    if ok:
+        session = SessionLocal()
+        try:
+            lead = session.get(Lead, lead_id)
+            if lead:
+                lead.forwarded = True
+                session.commit()
+        finally:
+            session.close()
 
-    session = SessionLocal()
     try:
-        lead = session.get(Lead, lead_id)
-        if lead:
-            lead.forwarded = True
-            session.commit()
-    finally:
-        session.close()
+        append_lead_row(name, company, email, phone, need)
+    except Exception:
+        logger.exception("Lead forward (Sheets) failed for lead_id=%s", lead_id)
 
 
 def _finalize_lead(db: Session, session_id: str, state: dict, background_tasks: BackgroundTasks) -> LeadStepResult:
@@ -352,9 +453,10 @@ def _finalize_lead(db: Session, session_id: str, state: dict, background_tasks: 
     db.commit()
     db.refresh(lead)
 
-    contact = lead.email or lead.phone or ""
     need = lead.message or ""
-    background_tasks.add_task(_forward_lead_async, lead.id, lead.name or "", contact, need)
+    background_tasks.add_task(
+        _forward_lead_async, lead.id, lead.name or "", lead.company or "", lead.email or "", lead.phone or "", need
+    )
 
     _store_completed_lead(session_id, state)
     reset_session(session_id)
@@ -392,6 +494,7 @@ def _handle_lead_message_locked(
 
     if pending_field is None and _next_missing_field(state) == "name" and _get_completed_lead(session_id):
         state["_awaiting"] = "_reuse_confirm"
+        _persist_session(db, session_id, state)
         return LeadStepResult(reply=REUSE_DETAILS_PROMPT, consumed=True)
 
     if pending_field:
@@ -439,5 +542,6 @@ def _handle_lead_message_locked(
 
     next_step = _advance_to_next_field(state)
     if next_step is not None:
+        _persist_session(db, session_id, state)
         return next_step
     return _finalize_lead(db, session_id, state, background_tasks)

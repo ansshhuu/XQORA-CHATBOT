@@ -53,6 +53,28 @@ class FAQ(Base):
     answer = Column(Text, nullable=False)
 
 
+class LeadSession(Base):
+    """Durable store for in-progress (not yet completed) lead-collection
+    state, keyed by session_id. lead_agent.py loads/saves this on every
+    lead-flow turn so a server restart mid-form doesn't lose partially
+    collected fields - the in-memory session cache it also keeps is just a
+    same-process performance cache in front of this table now, not the
+    source of truth."""
+
+    __tablename__ = "lead_sessions"
+
+    session_id = Column(String(128), primary_key=True)
+    name = Column(String(200))
+    company = Column(String(200))
+    email = Column(String(200))
+    phone = Column(String(50))
+    message = Column(Text)
+    awaiting_field = Column(String(50))
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
 class Feedback(Base):
     """session_id links back to the same session used in ChatHistory, so a
     feedback row can be traced to the conversation it's about."""
@@ -119,6 +141,55 @@ def save_feedback(
     db.commit()
     db.refresh(entry)
     return entry
+
+
+def load_lead_session(db: Session, session_id: str) -> dict | None:
+    """Returns the persisted in-progress lead state for `session_id`, shaped
+    to match lead_agent's in-memory state dict (LEAD_FIELDS plus
+    "_awaiting"), or None if nothing's been saved for it (fresh session, or
+    already completed/cancelled)."""
+    row = db.get(LeadSession, session_id)
+    if row is None:
+        return None
+    return {
+        "name": row.name,
+        "company": row.company,
+        "email": row.email,
+        "phone": row.phone,
+        "message": row.message,
+        "_awaiting": row.awaiting_field,
+    }
+
+
+def save_lead_session(db: Session, session_id: str, state: dict) -> None:
+    """Upserts the given lead_agent state dict into the lead_sessions table."""
+    row = db.get(LeadSession, session_id)
+    if row is None:
+        row = LeadSession(session_id=session_id)
+        db.add(row)
+    row.name = state.get("name")
+    row.company = state.get("company")
+    row.email = state.get("email")
+    row.phone = state.get("phone")
+    row.message = state.get("message")
+    row.awaiting_field = state.get("_awaiting")
+    db.commit()
+
+
+def delete_lead_session(db: Session, session_id: str) -> None:
+    row = db.get(LeadSession, session_id)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+
+def delete_stale_lead_sessions(db: Session, older_than: datetime) -> int:
+    """Clears abandoned in-progress lead forms last touched before
+    `older_than`, mirroring lead_agent's in-memory TTL sweep so the table
+    doesn't grow forever with forms nobody ever came back to finish."""
+    deleted = db.query(LeadSession).filter(LeadSession.updated_at < older_than).delete()
+    db.commit()
+    return deleted
 
 
 def get_recent_chat_history(db: Session, session_id: str, limit: int = 3) -> list[ChatHistory]:

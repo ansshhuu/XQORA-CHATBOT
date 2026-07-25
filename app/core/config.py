@@ -11,6 +11,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 TEAM_EMAIL = os.getenv("TEAM_EMAIL", "")
 
+GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", "")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./xqora_chatbot.db")
 
 CORS_ORIGINS = [

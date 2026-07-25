@@ -37,7 +37,7 @@ xqora-chatbot/
 │   ├── main.py                  # FastAPI app entrypoint, CORS, static mount, error handler
 │   ├── orchestrator.py          # single decision point: feedback -> guardrail -> route -> log
 │   ├── prompt.py                # system prompts (guardrail, FAQ, recommend, escalation, feedback)
-│   ├── database.py              # SQLAlchemy models (Lead, ChatHistory, FAQ, Feedback) + sanitize_input()
+│   ├── database.py              # SQLAlchemy models (Lead, LeadSession, ChatHistory, FAQ, Feedback) + sanitize_input()
 │   ├── utils.py                 # small shared helpers (e.g. bare-greeting detection)
 │   ├── agents/
 │   │   ├── intent_agent.py      # guardrail layers + intent classification
@@ -50,7 +50,8 @@ xqora-chatbot/
 │   │   └── chat.py              # /chat endpoint: validation, rate limiting, session_id
 │   ├── services/
 │   │   ├── ai_service.py        # Groq model calls
-│   │   └── lead_service.py      # forwards leads via Resend
+│   │   ├── lead_service.py      # forwards leads via Resend (email)
+│   │   └── sheets_service.py    # appends leads to a Google Sheet (service account)
 │   └── core/
 │       └── config.py            # env var / settings loader
 ├── data/
@@ -72,7 +73,7 @@ xqora-chatbot/
 python -m venv venv
 source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env          # fill in your Groq API key, Resend key, and team email
+cp .env.example .env          # fill in your Groq API key, Resend key, team email, and (optional) Google Sheets config
 uvicorn app.main:app --reload
 ```
 
@@ -150,6 +151,82 @@ or just tell me)"). This only fires once per session:
 - Detection is deterministic (regex/keyword-based), not AI-based, so a feedback reply can
   never be misclassified as off-topic or misrouted to another agent.
 
+## Lead capture, persistence & isolation
+
+`lead_agent.py` collects a lead's details (name, company, email, phone, a short need
+description) step by step across turns, tracked per `session_id`.
+
+**Session persistence**: in-progress collection state is cached in memory for
+same-process speed, but that cache is not the source of truth - every turn that changes
+the state also saves it to the `lead_sessions` table (`app/database.py`), and a cache miss
+(a session's first message, or any session that predates the current process - e.g. right
+after a restart) reads it back from there instead of starting the form over. That's what
+lets a partially-filled form survive a server restart: the next message after a restart is
+recognized as still mid-collection and resumes from the field it was paused on, with
+everything collected so far intact. Abandoned in-progress forms are cleared out of
+`lead_sessions` on the same TTL (`SESSION_TTL_SECONDS`) as the in-memory cache. A
+multi-worker/multi-instance deployment would still want a shared cache (e.g. Redis) in
+front of the DB to avoid a DB round-trip on every turn, but correctness no longer depends
+on the in-memory dict surviving.
+
+**Session isolation**: all session state (in-progress lead data, the completed-lead reuse
+cache, feedback ask/response state) is looked up strictly by `session_id` - dicts keyed by
+`session_id` in memory, and the `session_id` primary key on `lead_sessions` in the DB -
+never a shared/global variable, so two concurrent users' sessions can't see or overwrite
+each other's data. `tests/test_e2e.py --mocked` includes a dedicated regression
+(`_feature_session_isolation_concurrent_leads`) that interleaves two lead flows turn by
+turn under different `session_id`s and confirms neither the in-memory state nor the
+persisted `lead_sessions` rows cross over, plus `_feature_lead_session_db_persistence`
+which simulates a restart (clearing the in-memory cache mid-flow) and confirms the form
+resumes correctly from the DB.
+
+On completion, the lead is saved to the `Leads` table and forwarded to the team from a
+single fire-and-forget background job (`lead_agent._forward_lead_async`, doesn't block the
+chat response): an email through Resend (`lead_service.py`), and a new row in a shared
+Google Sheet (`sheets_service.py`, see below). The two are independent - each is wrapped in
+its own try/except, so a Sheets failure never blocks or breaks the email (or the lead
+already saved to the DB), and vice versa.
+
+## Google Sheets integration
+
+Every completed lead is appended as a new row (name, company, email, phone, requirement,
+timestamp) to a shared Google Sheet, via a service account - no per-user OAuth flow, no
+browser consent screen, just server-to-server auth. This runs in the same background job as
+the email forward (see above): it never blocks the chat response, and a failure (missing
+config, network error, bad credentials, wrong sheet ID) is logged server-side only, never
+surfaced to the user, and never affects the email forward or the lead record itself.
+
+**Setup**:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create or select a
+   project, then enable the **Google Sheets API** for it (APIs & Services -> Library).
+2. Create a service account (APIs & Services -> Credentials -> Create Credentials ->
+   Service Account). Give it any name; no special roles are needed.
+3. Open the service account, go to the **Keys** tab, and create a new JSON key. This
+   downloads a `.json` credentials file - keep it out of version control (it's a secret).
+4. Open the target Google Sheet in your browser, click **Share**, and share it with the
+   service account's email address (looks like
+   `something@your-project.iam.gserviceaccount.com`, found on the service account's
+   details page) with **Editor** access. The sheet won't be writable by the app without
+   this step.
+5. Copy the sheet's ID out of its URL:
+   `https://docs.google.com/spreadsheets/d/`**`THE_SHEET_ID`**`/edit`.
+6. In `.env`, set:
+   ```
+   GOOGLE_SHEETS_CREDENTIALS_PATH=/path/to/your-service-account-key.json
+   GOOGLE_SHEET_ID=THE_SHEET_ID
+   ```
+   `GOOGLE_SHEETS_CREDENTIALS_PATH` accepts either a filesystem path to the key file (as
+   above), or the key's JSON contents pasted in directly as a single-line string (detected
+   automatically by a leading `{`) - handy for hosts where writing a credentials file to
+   disk is awkward and the key is injected as an env var instead. Rows are appended to the
+   first worksheet (`sheet1`) of that spreadsheet.
+
+This integration is optional: if either env var is unset, lead capture and the email
+forward still work exactly as before - `sheets_service.py` logs a warning and skips the
+Sheets append rather than raising, so a missing/misconfigured Sheets setup can never break
+the chat flow or the email forward.
+
 ## Testing
 
 ```bash
@@ -172,7 +249,17 @@ Uses a throwaway SQLite file (`tests/_e2e_test.db`), cleaned up automatically. T
 summary; add `pytest` if the test suite grows past this smoke test.
 
 The same file also has a mocked regression suite that doesn't call Groq at all — useful
-for iterating on guardrail/routing logic without burning API quota:
+for iterating on guardrail/routing logic without burning API quota. In addition to the
+guardrail/routing/feedback regressions, it covers:
+- `_feature_lead_session_db_persistence`: a lead form's partial state survives a simulated
+  server restart (the in-memory session cache is cleared mid-flow, then the same session
+  resumes correctly from the persisted `lead_sessions` row).
+- `_feature_session_isolation_concurrent_leads`: two lead flows under different
+  `session_id`s, with turns interleaved rather than run back-to-back, never cross-
+  contaminate each other's in-memory or persisted state.
+- `_feature_sheets_and_email_forward_failure_isolation`: a Google Sheets append failure
+  never stops the email forward (or unsets `lead.forwarded`), and an email failure never
+  stops the Sheets append - checked in both directions against real `Leads` rows.
 
 ```bash
 python tests/test_e2e.py --mocked
