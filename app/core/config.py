@@ -21,9 +21,6 @@ RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
 
 MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "1000"))
 
-# How long a session's in-memory state (lead collection progress, completed-lead
-# reuse details, feedback ask/response state) is kept after its last activity,
-# before being evicted to bound memory growth on a long-running instance.
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
 
 
