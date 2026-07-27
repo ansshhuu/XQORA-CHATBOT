@@ -11,7 +11,7 @@ import re
 
 import requests
 
-from app.core.config import GROQ_API_KEY, OPENROUTER_API_KEY
+from app.core.config import GROQ_API_KEY, OPENROUTER_API_KEY, TEST_MODE
 
 logger = logging.getLogger("xqora.ai_service")
 
@@ -129,6 +129,19 @@ def get_ai_response(message: str, system_prompt: str | None = None) -> str:
     recommend_agent, lead_agent) already catches that and falls back to its
     own keyword-matched/heuristic response, so that existing last-resort
     behavior is unchanged and needs no edits here."""
+    if TEST_MODE:
+        # Never hit real Groq/OpenRouter in a test run. Raising the same
+        # AIServiceError a genuine provider outage would produce - rather
+        # than inventing a new canned string - means every caller already has
+        # tested, deterministic fallback behavior for this (see
+        # tests/test_e2e.py's _bug7_total_ai_outage_no_fake_content and each
+        # agent's own AIServiceError handling), so no new mock fixtures are
+        # needed here. Tests that need a specific AI answer instead patch
+        # get_ai_response directly at the call site (see test_e2e.py
+        # --mocked), which takes precedence over this guard entirely.
+        logger.info("[TEST MODE] skipping real Groq/OpenRouter call; raising AIServiceError for caller fallback")
+        raise AIServiceError("TEST_MODE active - real AI providers are not called")
+
     try:
         result = get_groq_response(message, system_prompt)
         logger.info("AI response served_by=groq")

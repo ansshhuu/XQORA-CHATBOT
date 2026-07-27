@@ -2,16 +2,16 @@
 Google Sheets integration: appends each completed lead as a new row (name,
 company, email, phone, requirement, timestamp) to a shared spreadsheet, via
 a service account - server-to-server auth, no per-user OAuth consent flow
-needed. Wired into lead_agent.py's _forward_lead_async, the same
-fire-and-forget background job that sends the email notification: both run
+needed. Wired into lead_agent.py's _forward_lead_now, called inline (before
+the chat response is sent) alongside the email notification: both run
 there, each independently error-handled, so a Sheets failure never affects
 the email or the other way around.
 
-GOOGLE_SHEETS_CREDENTIALS_PATH accepts either a filesystem path to the
-service account's JSON key, or the JSON key's contents pasted inline
-(detected by a leading "{") - useful for deployment targets where writing a
-credentials file to disk isn't convenient and the key is injected as a
-single env var instead.
+GOOGLE_CREDS_JSON holds the full service-account JSON key's contents as a
+single env var (parsed via json.loads) - there's no credentials file on
+disk in this deployment model (Vercel's filesystem doesn't carry a
+repo-local credentials/ folder into the deployed function), so the key must
+travel as an env var end to end.
 
 The gspread client authenticates once per process and is reused across
 calls - service account credentials don't expire the way user OAuth tokens
@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 
-from app.core.config import GOOGLE_SHEET_ID, GOOGLE_SHEETS_CREDENTIALS_PATH
+from app.core.config import GOOGLE_CREDS_JSON, GOOGLE_SHEET_ID
 
 logger = logging.getLogger("xqora.sheets_service")
 
@@ -45,10 +45,7 @@ _header_lock = threading.Lock()
 def _load_credentials():
     from google.oauth2.service_account import Credentials
 
-    value = GOOGLE_SHEETS_CREDENTIALS_PATH.strip()
-    if value.startswith("{"):
-        return Credentials.from_service_account_info(json.loads(value), scopes=_SCOPES)
-    return Credentials.from_service_account_file(value, scopes=_SCOPES)
+    return Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=_SCOPES)
 
 
 def _get_client():
@@ -82,7 +79,7 @@ def _ensure_header(worksheet) -> None:
 
 
 def append_lead_row(name: str, company: str, email: str, phone: str, requirement: str) -> bool:
-    if not GOOGLE_SHEETS_CREDENTIALS_PATH or not GOOGLE_SHEET_ID:
+    if not GOOGLE_CREDS_JSON or not GOOGLE_SHEET_ID:
         logger.warning("Google Sheets not configured (missing credentials or sheet ID); skipping row append")
         return False
 

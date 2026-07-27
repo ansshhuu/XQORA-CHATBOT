@@ -18,12 +18,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEST_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_e2e_test.db")
 if os.path.exists(TEST_DB_PATH):
     os.remove(TEST_DB_PATH)
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH}"
+# setdefault (not a forced override): lets DATABASE_URL be pointed at a real
+# Postgres instance externally (e.g. `DATABASE_URL=postgresql://... python
+# tests/test_e2e.py --mocked`) to confirm the suite passes there too, while
+# still defaulting to a throwaway local SQLite file for the common case.
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{TEST_DB_PATH}")
 # This script fires ~15 requests in a few seconds from one IP, which would
 # otherwise trip the real 10/min rate limiter well before the scenarios finish.
 os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "1000")
 
-from fastapi import BackgroundTasks  # noqa: E402
+# --mocked must set TEST_MODE=true BEFORE app.core.config is imported below
+# (it reads the env var once, at import time, into a module-level constant),
+# so run_mocked_tests() gets ai_service.py/lead_service.py's TEST_MODE guard
+# as a safety net on top of its own explicit unittest.mock.patch calls - a
+# call site that forgets to mock still can't burn real Groq/OpenRouter/Resend
+# quota. Plain `python tests/test_e2e.py` (main(), no --mocked) deliberately
+# leaves TEST_MODE unset, since that suite intentionally hits real AI APIs.
+if "--mocked" in sys.argv:
+    os.environ["TEST_MODE"] = "true"
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
@@ -83,6 +96,13 @@ def _post(client, payload):
 
 
 def main():
+    # init_db() is no longer called from app.main's startup event (see its
+    # comment) - each test entrypoint that needs tables now creates them
+    # itself, the same way run_mocked_tests() already does.
+    from app.database import init_db
+
+    init_db()
+
     with TestClient(app) as client:
         # 1. FAQ intent
         r = _post(client, {"message": "What services does XQORA provide?"})
@@ -839,7 +859,7 @@ def _bug4_no_nudge_after_off_topic_refusal():
         with patch("app.agents.lead_agent.get_ai_response", return_value="NO"), patch(
             "app.agents.intent_agent.get_ai_response", return_value="off_topic"
         ):
-            reply = handle_message(db, session_id, "asdkjqwer zxcvasdf nonsense blah", BackgroundTasks())
+            reply = handle_message(db, session_id, "asdkjqwer zxcvasdf nonsense blah")
     finally:
         db.close()
 
@@ -866,7 +886,7 @@ def _bug4_no_nudge_after_off_topic_refusal():
     db = SessionLocal()
     try:
         with patch("app.agents.lead_agent.get_ai_response", return_value="NO"):
-            reply2 = handle_message(db, session_id2, "can you handle a large government tender project", BackgroundTasks())
+            reply2 = handle_message(db, session_id2, "can you handle a large government tender project")
     finally:
         db.close()
 
@@ -915,15 +935,14 @@ def _feature_reuse_lead_details():
 
     db = SessionLocal()
     try:
-        bg = BackgroundTasks()
-        r1 = lead_agent.handle_lead_message(db, session_id, "I want to get a quote", bg)
+        r1 = lead_agent.handle_lead_message(db, session_id, "I want to get a quote")
         check(
             "Feature (mocked): reuse-or-new prompt offered on a second lead trigger",
             r1.reply == lead_agent.REUSE_DETAILS_PROMPT,
             r1,
         )
 
-        r2 = lead_agent.handle_lead_message(db, session_id, "yes, use the same details", bg)
+        r2 = lead_agent.handle_lead_message(db, session_id, "yes, use the same details")
         state = session_service._lead_cache.peek(session_id)
         check(
             "Feature (mocked): reuse fills in the prior contact fields",
@@ -936,7 +955,7 @@ def _feature_reuse_lead_details():
             r2.reply,
         )
 
-        lead_agent.handle_lead_message(db, session_id, "Need a new landing page built", bg)
+        lead_agent.handle_lead_message(db, session_id, "Need a new landing page built")
         lead = db.query(Lead).filter(Lead.session_id == session_id).order_by(Lead.id.desc()).first()
         check(
             "Feature (mocked): lead finalized with reused contact info + the new inquiry message",
@@ -959,14 +978,13 @@ def _feature_reuse_lead_details():
 
     db = SessionLocal()
     try:
-        bg = BackgroundTasks()
-        r1 = lead_agent.handle_lead_message(db, session_id2, "I want to get a quote", bg)
+        r1 = lead_agent.handle_lead_message(db, session_id2, "I want to get a quote")
         check(
             "Feature (mocked): reuse-or-new prompt offered (decline case)",
             r1.reply == lead_agent.REUSE_DETAILS_PROMPT,
             r1,
         )
-        r2 = lead_agent.handle_lead_message(db, session_id2, "no, I'll provide new details", bg)
+        r2 = lead_agent.handle_lead_message(db, session_id2, "no, I'll provide new details")
         check(
             "Feature (mocked): declining reuse asks for name from scratch",
             "name" in r2.reply.lower(),
@@ -1131,7 +1149,7 @@ def _bug7_total_ai_outage_no_fake_content():
     db = SessionLocal()
     try:
         with patch("app.agents.intent_agent.get_ai_response", side_effect=AIServiceError("both providers down")):
-            reply = handle_message(db, session_id, "I need a chatbot built for my business", BackgroundTasks())
+            reply = handle_message(db, session_id, "I need a chatbot built for my business")
     finally:
         db.close()
     check(
@@ -1217,7 +1235,7 @@ def _feedback_after_lead_submission():
 
     db = SessionLocal()
     try:
-        reply = handle_message(db, session_id, "Need a website redesign", BackgroundTasks())
+        reply = handle_message(db, session_id, "Need a website redesign")
     finally:
         db.close()
 
@@ -1239,7 +1257,7 @@ def _feedback_after_lead_submission():
 def _feedback_rating_and_comment_saved(session_id):
     db = SessionLocal()
     try:
-        reply = handle_message(db, session_id, "5 - loved how fast this was!", BackgroundTasks())
+        reply = handle_message(db, session_id, "5 - loved how fast this was!")
         fb = db.query(Feedback).filter(Feedback.session_id == session_id).order_by(Feedback.id.desc()).first()
     finally:
         db.close()
@@ -1272,7 +1290,7 @@ def _feedback_after_escalation():
     # canned text - this whole scenario needs no mocking.
     db = SessionLocal()
     try:
-        reply = handle_message(db, session_id, "can you handle a large government tender project", BackgroundTasks())
+        reply = handle_message(db, session_id, "can you handle a large government tender project")
     finally:
         db.close()
 
@@ -1292,7 +1310,7 @@ def _feedback_ignored_does_not_loop_or_misfire():
 
     db = SessionLocal()
     try:
-        reply1 = handle_message(db, session_id, "thanks, bye", BackgroundTasks())
+        reply1 = handle_message(db, session_id, "thanks, bye")
     finally:
         db.close()
     check("Feedback (mocked): closing phrase triggers the feedback ask", FEEDBACK_ASK in reply1, reply1)
@@ -1306,7 +1324,7 @@ def _feedback_ignored_does_not_loop_or_misfire():
     with patch("app.agents.intent_agent.get_ai_response", return_value="faq"):
         db = SessionLocal()
         try:
-            reply2 = handle_message(db, session_id, "what services does XQORA provide?", BackgroundTasks())
+            reply2 = handle_message(db, session_id, "what services does XQORA provide?")
         finally:
             db.close()
 
@@ -1332,7 +1350,7 @@ def _feedback_ignored_does_not_loop_or_misfire():
     with patch("app.agents.intent_agent.get_ai_response", return_value="faq"):
         db = SessionLocal()
         try:
-            reply3 = handle_message(db, session_id, "thanks, bye", BackgroundTasks())
+            reply3 = handle_message(db, session_id, "thanks, bye")
         finally:
             db.close()
     check(
@@ -1359,12 +1377,11 @@ def _feature_lead_session_db_persistence():
 
     db = SessionLocal()
     try:
-        bg = BackgroundTasks()
         with patch("app.agents.lead_agent.get_ai_response", return_value="YES"):
-            r1 = lead_agent.handle_lead_message(db, session_id, "I want to start a project and get a quote", bg)
+            r1 = lead_agent.handle_lead_message(db, session_id, "I want to start a project and get a quote")
             check("DB persistence: lead flow starts, asking for name", "name" in r1.reply.lower(), r1.reply)
 
-            r2 = lead_agent.handle_lead_message(db, session_id, "Jordan Lee", bg)
+            r2 = lead_agent.handle_lead_message(db, session_id, "Jordan Lee")
             check("DB persistence: name accepted, asking for company", "company" in r2.reply.lower(), r2.reply)
     finally:
         db.close()
@@ -1388,9 +1405,8 @@ def _feature_lead_session_db_persistence():
 
     db = SessionLocal()
     try:
-        bg = BackgroundTasks()
         with patch("app.agents.lead_agent.get_ai_response", return_value="YES"):
-            r3 = lead_agent.handle_lead_message(db, session_id, "Acme Rockets", bg)
+            r3 = lead_agent.handle_lead_message(db, session_id, "Acme Rockets")
     finally:
         db.close()
     check(
@@ -1430,16 +1446,15 @@ def _feature_session_isolation_concurrent_leads():
 
     db = SessionLocal()
     try:
-        bg = BackgroundTasks()
         with patch("app.agents.lead_agent.get_ai_response", return_value="YES"):
-            lead_agent.handle_lead_message(db, session_a, "I want to start a project and get a quote", bg)
-            lead_agent.handle_lead_message(db, session_b, "I want to start a project and get a quote", bg)
+            lead_agent.handle_lead_message(db, session_a, "I want to start a project and get a quote")
+            lead_agent.handle_lead_message(db, session_b, "I want to start a project and get a quote")
 
-            lead_agent.handle_lead_message(db, session_a, "Alice Anderson", bg)
-            lead_agent.handle_lead_message(db, session_b, "Bob Brown", bg)
+            lead_agent.handle_lead_message(db, session_a, "Alice Anderson")
+            lead_agent.handle_lead_message(db, session_b, "Bob Brown")
 
-            lead_agent.handle_lead_message(db, session_a, "Alpha Inc", bg)
-            lead_agent.handle_lead_message(db, session_b, "Beta LLC", bg)
+            lead_agent.handle_lead_message(db, session_a, "Alpha Inc")
+            lead_agent.handle_lead_message(db, session_b, "Beta LLC")
     finally:
         db.close()
 
@@ -1478,7 +1493,7 @@ def _feature_session_isolation_concurrent_leads():
 
 def _feature_sheets_and_email_forward_failure_isolation():
     """The email forward and the Google Sheets row append run in the same
-    background job (lead_agent._forward_lead_async) but must be fully
+    inline call (lead_agent._forward_lead_now) but must be fully
     independent: a failure in either one must never stop the other from
     being attempted, and must never affect the lead already saved to the
     Leads table. Checked in both directions with real Lead rows (not just
@@ -1504,7 +1519,7 @@ def _feature_sheets_and_email_forward_failure_isolation():
     with patch("app.agents.lead_agent.forward_lead", return_value=True) as mock_email, patch(
         "app.agents.lead_agent.append_lead_row", side_effect=Exception("bad sheet id")
     ) as mock_sheets:
-        lead_agent._forward_lead_async(
+        lead_agent._forward_lead_now(
             lead1_id, "Sheets Failure Test", "Acme Inc", "sheetsfail@example.com", "+15551230000", "test need one"
         )
 
@@ -1542,7 +1557,7 @@ def _feature_sheets_and_email_forward_failure_isolation():
     with patch(
         "app.agents.lead_agent.forward_lead", side_effect=Exception("resend down")
     ) as mock_email2, patch("app.agents.lead_agent.append_lead_row", return_value=True) as mock_sheets2:
-        lead_agent._forward_lead_async(
+        lead_agent._forward_lead_now(
             lead2_id, "Email Failure Test", "Beta LLC", "emailfail@example.com", "+15559990000", "test need two"
         )
 

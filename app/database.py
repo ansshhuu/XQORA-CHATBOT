@@ -108,6 +108,14 @@ class FeedbackState(Base):
 
 
 def init_db() -> None:
+    """Creates any tables that don't already exist yet. Call this once,
+    manually (`python -m app.database`), against a fresh Postgres instance
+    before the app's first deploy - it is deliberately NOT called from
+    app.main's startup event, since that event fires on every serverless
+    cold start and re-running create_all() on every cold start is wasteful
+    (and, under concurrent cold starts, a race) rather than a one-time
+    setup step. Safe to re-run: create_all() only creates tables that are
+    missing, it never touches existing ones."""
     Base.metadata.create_all(bind=engine)
 
 
@@ -273,3 +281,11 @@ def get_recent_chat_history(db: Session, session_id: str, limit: int = 3) -> lis
         .all()
     )
     return list(reversed(rows))
+
+
+if __name__ == "__main__":
+    # One-time manual setup against a fresh Postgres instance:
+    #   DATABASE_URL=postgresql://... python -m app.database
+    # Never prints DATABASE_URL itself (it may embed a password).
+    init_db()
+    print("Database tables created (or already existed).")

@@ -24,7 +24,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEST_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_chatbot_flows_test.db")
 if os.path.exists(TEST_DB_PATH):
     os.remove(TEST_DB_PATH)
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH}"
+# setdefault (not a forced override): lets DATABASE_URL be pointed at a real
+# Postgres instance externally to confirm this suite passes there too, while
+# still defaulting to a throwaway local SQLite file for the common case.
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{TEST_DB_PATH}")
 os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "1000")
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -113,7 +116,7 @@ def _test_greeting(client):
 
 
 # ---------------------------------------------------------------------------
-# 2. Each widget quick-reply button (see static/widget.js QUICK_REPLIES)
+# 2. Each widget quick-reply button (see public/widget.js QUICK_REPLIES)
 # ---------------------------------------------------------------------------
 
 
@@ -248,8 +251,8 @@ def _test_full_lead_form_flow(client):
         body6 = r6.json()
         check("Lead form: turn 6 (message) finalizes the lead", "thanks" in body6["reply"].lower(), r6.text)
 
-    check("Lead form: email forward attempted (background task ran)", mock_email.called, None)
-    check("Lead form: sheet row write attempted (background task ran)", mock_sheets.called, None)
+    check("Lead form: email forward attempted (inline before response)", mock_email.called, None)
+    check("Lead form: sheet row write attempted (inline before response)", mock_sheets.called, None)
     if mock_sheets.called:
         sheet_args = mock_sheets.call_args.args
         check(

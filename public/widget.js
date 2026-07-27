@@ -22,7 +22,10 @@
     (currentScript && currentScript.getAttribute("data-feedback-submit-url")) || "/feedback/submit";
   var FEEDBACK_CANCEL_URL =
     (currentScript && currentScript.getAttribute("data-feedback-cancel-url")) || "/feedback/cancel";
-  var AVATAR_URL = "/static/bot-avatar.png";
+  // Served by Vercel directly from /public at the site root, so this is
+  // root-relative (no /static prefix - nothing mounts these files via
+  // FastAPI anymore).
+  var AVATAR_URL = "/bot-avatar.png";
 
   // Must match app/prompt.py's FEEDBACK_ASK exactly - the server still
   // appends this literal text to the reply (backend logic is unchanged),

@@ -6,7 +6,6 @@ History.
 import logging
 import re
 
-from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.agents import feedback_agent
@@ -155,16 +154,12 @@ def _own_info_reply(session_id: str, message: str) -> str | None:
 
 
 _ROUTES = {
-    "faq": lambda db, session_id, message, background_tasks, recent_context: get_faq_response(
+    "faq": lambda db, session_id, message, recent_context: get_faq_response(message, recent_context),
+    "recommend": lambda db, session_id, message, recent_context: get_recommendation_response(
         message, recent_context
     ),
-    "recommend": lambda db, session_id, message, background_tasks, recent_context: get_recommendation_response(
-        message, recent_context
-    ),
-    "lead": lambda db, session_id, message, background_tasks, recent_context: handle_lead_message(
-        db, session_id, message, background_tasks
-    ).reply,
-    "escalate": lambda db, session_id, message, background_tasks, recent_context: get_escalation_response(),
+    "lead": lambda db, session_id, message, recent_context: handle_lead_message(db, session_id, message).reply,
+    "escalate": lambda db, session_id, message, recent_context: get_escalation_response(),
 }
 
 
@@ -182,7 +177,6 @@ def _route(
     db: Session,
     session_id: str,
     message: str,
-    background_tasks: BackgroundTasks,
     skip_handler_intents: frozenset[str] = frozenset(),
 ) -> tuple[str | None, str]:
     """Classify + dispatch a message that's NOT a lead-collection answer.
@@ -206,7 +200,7 @@ def _route(
         return None, result.intent
 
     handler = _ROUTES.get(result.intent, lambda *_: get_escalation_response())
-    reply = handler(db, session_id, message, background_tasks, recent_context)
+    reply = handler(db, session_id, message, recent_context)
     return reply, result.intent
 
 
@@ -215,9 +209,7 @@ def _append_feedback_ask(db: Session, session_id: str, reply: str) -> str:
     return f"{reply}\n\n{FEEDBACK_ASK}"
 
 
-def _handle_message_impl(
-    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
-) -> tuple[str, str]:
+def _handle_message_impl(db: Session, session_id: str, message: str) -> tuple[str, str]:
     # Single piggyback point for the TTL sweep (lead state, feedback state,
     # completed-lead cache, per-session locks) - see session_service for why
     # this used to be two near-identical sweeps triggered independently.
@@ -237,7 +229,7 @@ def _handle_message_impl(
         return reply, "closing"
 
     if is_collecting(session_id):
-        lead_result = handle_lead_message(db, session_id, message, background_tasks)
+        lead_result = handle_lead_message(db, session_id, message)
 
         if lead_result.consumed:
             reply = lead_result.reply
@@ -245,7 +237,7 @@ def _handle_message_impl(
                 reply = _append_feedback_ask(db, session_id, reply)
             save_chat_history(db, session_id=session_id, message=message, response=reply, intent="lead")
             return reply, "lead"
-        reply, intent_label = _route(db, session_id, message, background_tasks, skip_handler_intents={"lead"})
+        reply, intent_label = _route(db, session_id, message, skip_handler_intents={"lead"})
         if intent_label == "lead":
             combined_reply = lead_result.reply
         elif intent_label == "off_topic":
@@ -256,7 +248,7 @@ def _handle_message_impl(
         save_chat_history(db, session_id=session_id, message=message, response=combined_reply, intent=intent_label)
         return combined_reply, intent_label
 
-    reply, intent_label = _route(db, session_id, message, background_tasks)
+    reply, intent_label = _route(db, session_id, message)
 
     if intent_label in ("off_topic", "greeting"):
         return reply, intent_label
@@ -268,17 +260,15 @@ def _handle_message_impl(
     return reply, intent_label
 
 
-def handle_message(db: Session, session_id: str, message: str, background_tasks: BackgroundTasks) -> str:
-    reply, _ = _handle_message_impl(db, session_id, message, background_tasks)
+def handle_message(db: Session, session_id: str, message: str) -> str:
+    reply, _ = _handle_message_impl(db, session_id, message)
     return reply
 
 
-def handle_message_with_intent(
-    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
-) -> tuple[str, str]:
+def handle_message_with_intent(db: Session, session_id: str, message: str) -> tuple[str, str]:
     """Same as handle_message but also returns the classified intent label,
     so callers (the /chat route) can tell the frontend when a greeting fired
     - used to re-show the quick-reply buttons under every greeting, not just
     the very first one, without changing handle_message's existing str
     return type that other callers/tests depend on."""
-    return _handle_message_impl(db, session_id, message, background_tasks)
+    return _handle_message_impl(db, session_id, message)

@@ -2,7 +2,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -72,14 +72,13 @@ def _enforce_rate_limit(key: str) -> None:
 def handle_chat(
     request: ChatRequest,
     http_request: Request,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     session_id = request.session_id or str(uuid.uuid4())
     client_ip = http_request.client.host if http_request.client else "unknown"
     _enforce_rate_limit(client_ip)
 
-    reply, intent_label = handle_message_with_intent(db, session_id, request.message, background_tasks)
+    reply, intent_label = handle_message_with_intent(db, session_id, request.message)
     awaiting_feedback = feedback_agent.is_awaiting_response(session_id)
     return ChatResponse(
         reply=reply,

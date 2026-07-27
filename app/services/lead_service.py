@@ -8,7 +8,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import resend
 
-from app.core.config import RESEND_API_KEY, TEAM_EMAIL
+from app.core.config import RESEND_API_KEY, TEAM_EMAIL, TEST_MODE
 
 logger = logging.getLogger("xqora.lead_service")
 
@@ -20,6 +20,13 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="resend-send")
 
 
 def forward_lead(name: str, contact: str, need: str) -> bool:
+    if TEST_MODE:
+        # Never hit the real Resend API (and its send quota) during a test
+        # run. Logged, not silently skipped, so a test run's logs make it
+        # obvious a real email would have gone out here.
+        logger.info("[TEST MODE] would have sent email to %s (lead: %s, contact: %s)", TEAM_EMAIL, name, contact)
+        return True
+
     def _send() -> None:
         resend.Emails.send(
             {

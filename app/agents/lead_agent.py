@@ -1,8 +1,8 @@
 """
 Lead agent: collects lead details step-by-step across turns, tracked per
-session_id, then saves to the Leads table and forwards asynchronously via
-lead_service (email) and sheets_service (Google Sheets row) - doesn't block
-the chat response on either send.
+session_id, then saves to the Leads table and forwards inline via
+lead_service (email) and sheets_service (Google Sheets row) before the chat
+response is returned - see the forwarding note further down for why.
 
 Only collects name, company (optional), email, phone, and a short need
 description. No budget or service-fit discussion here, that's handled by
@@ -33,12 +33,22 @@ This module only holds the lead-collection state *machine* (which field is
 asked next, validation, AI plausibility checks); session_service owns where
 that state actually lives, including the in-memory-cache-in-front-of-DB
 pattern that used to be reimplemented here directly.
+
+On finalization, the email (Resend) and Google Sheets forwarding happen
+inline, synchronously, before handle_lead_message returns - not via
+FastAPI's BackgroundTasks. BackgroundTasks only runs its callbacks after the
+HTTP response is sent, which on a serverless platform (Vercel) is exactly
+when the function may be frozen or torn down, so a deferred send could
+silently never happen. Both forward_lead and append_lead_row already block
+with their own bounded timeout (see lead_service.py/sheets_service.py), so
+calling them inline just moves a few hundred ms of already-bounded latency
+into the request instead of after it - a deliberate tradeoff for guaranteed
+delivery over shaving response time.
 """
 import logging
 import re
 from dataclasses import dataclass
 
-from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.database import Lead, SessionLocal, sanitize_input
@@ -239,17 +249,17 @@ def _validate_phone(value: str) -> bool:
     return bool(_PHONE_VALIDATE_RE.match(_normalize_phone(value)))
 
 
-def _forward_lead_async(lead_id: int, name: str, company: str, email: str, phone: str, need: str) -> None:
-    """Fire-and-forget background job for a just-completed lead: forwards it
-    to the team by email, and appends it as a row to the shared Google
-    Sheet. The two are independent - a Sheets failure (bad sheet ID,
-    revoked/misconfigured credentials, network error) must never stop the
-    email from going out, and an email failure must never stop the Sheets
-    row, so each is wrapped in its own try/except rather than one failure
-    short-circuiting the other. (Both forward_lead and append_lead_row
-    already catch their own errors internally and return a bool rather than
-    raising - the try/except here is defense in depth, not the primary
-    safety net.)"""
+def _forward_lead_now(lead_id: int, name: str, company: str, email: str, phone: str, need: str) -> None:
+    """Called synchronously (inline, before handle_lead_message returns) for
+    a just-completed lead: forwards it to the team by email, and appends it
+    as a row to the shared Google Sheet. The two are independent - a Sheets
+    failure (bad sheet ID, revoked/misconfigured credentials, network error)
+    must never stop the email from going out, and an email failure must
+    never stop the Sheets row, so each is wrapped in its own try/except
+    rather than one failure short-circuiting the other. (Both forward_lead
+    and append_lead_row already catch their own errors internally and return
+    a bool rather than raising - the try/except here is defense in depth,
+    not the primary safety net.)"""
     contact = email or phone or ""
     try:
         ok = forward_lead(name, contact, need)
@@ -273,7 +283,7 @@ def _forward_lead_async(lead_id: int, name: str, company: str, email: str, phone
         logger.exception("Lead forward (Sheets) failed for lead_id=%s", lead_id)
 
 
-def _finalize_lead(db: Session, session_id: str, state: dict, background_tasks: BackgroundTasks) -> LeadStepResult:
+def _finalize_lead(db: Session, session_id: str, state: dict) -> LeadStepResult:
     lead = Lead(
         session_id=session_id,
         name=state["name"],
@@ -287,9 +297,7 @@ def _finalize_lead(db: Session, session_id: str, state: dict, background_tasks: 
     db.refresh(lead)
 
     need = lead.message or ""
-    background_tasks.add_task(
-        _forward_lead_async, lead.id, lead.name or "", lead.company or "", lead.email or "", lead.phone or "", need
-    )
+    _forward_lead_now(lead.id, lead.name or "", lead.company or "", lead.email or "", lead.phone or "", need)
 
     session_service.store_completed_lead(session_id, state)
     session_service.reset_lead_state(session_id)
@@ -308,20 +316,16 @@ def _advance_to_next_field(state: dict) -> LeadStepResult | None:
     return LeadStepResult(reply=prefix + FIELD_PROMPTS[next_field], consumed=True)
 
 
-def handle_lead_message(
-    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
-) -> LeadStepResult:
+def handle_lead_message(db: Session, session_id: str, message: str) -> LeadStepResult:
     """Serialized per session_id so concurrent requests for the same session
     (double-clicked send, a client retry) can't race on the session's dict -
     e.g. both reading a field as unfilled and both writing to it, or both
     finalizing the same lead."""
     with session_service.get_session_lock(session_id):
-        return _handle_lead_message_locked(db, session_id, message, background_tasks)
+        return _handle_lead_message_locked(db, session_id, message)
 
 
-def _handle_lead_message_locked(
-    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
-) -> LeadStepResult:
+def _handle_lead_message_locked(db: Session, session_id: str, message: str) -> LeadStepResult:
     state = dict(session_service.get_lead_state(session_id))
     pending_field = state.get("_awaiting")
 
@@ -377,4 +381,4 @@ def _handle_lead_message_locked(
     if next_step is not None:
         session_service.update_lead_state(session_id, state, db=db)
         return next_step
-    return _finalize_lead(db, session_id, state, background_tasks)
+    return _finalize_lead(db, session_id, state)

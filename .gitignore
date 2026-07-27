@@ -9,3 +9,6 @@ venv/
 .vscode/
 *.db
 credentials/
+.vercel
+.pytest_cache/
+vercel.log

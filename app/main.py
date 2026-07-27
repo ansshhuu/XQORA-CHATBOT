@@ -3,10 +3,8 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
-from app.core.config import CORS_ORIGINS, check_required_keys
-from app.database import init_db
+from app.core.config import CORS_ORIGINS, check_required_keys, check_test_mode_production_safety
 from app.routes import chat, feedback
 
 logger = logging.getLogger("xqora.main")
@@ -29,29 +27,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class NoCacheStaticFiles(StaticFiles):
-    """Static files with browser caching disabled.
-
-    Plain StaticFiles sends ETag/Last-Modified, so browsers cache widget.js
-    and revalidate on refresh (a 304 with the old cached copy served) instead
-    of always fetching what's actually on disk - confusing during active
-    widget development. Remove this override (or scope it to specific paths)
-    before a production deploy where caching the widget is actually wanted.
-    """
-
-    def file_response(self, *args, **kwargs):
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return response
-
-
-app.mount("/static", NoCacheStaticFiles(directory="static"), name="static")
-
-
 @app.on_event("startup")
 def on_startup() -> None:
-    init_db()
+    # Tables are created once, manually, via `python -m app.database` (see its
+    # __main__ block) - not here. On serverless (Vercel), this startup event
+    # runs on every cold start, so calling Base.metadata.create_all() here
+    # would re-run a schema check/DDL against Postgres on every cold start,
+    # which is wasteful and risky (racing concurrent cold starts against the
+    # same migration). tests/test_e2e.py calls init_db() directly itself for
+    # the same reason - this path is deliberately not automatic.
     check_required_keys()
+    check_test_mode_production_safety()
 
 
 @app.exception_handler(Exception)
