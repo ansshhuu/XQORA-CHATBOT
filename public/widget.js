@@ -140,8 +140,8 @@
     "object-fit: cover; object-position: center; display: block;" +
     "}" +
     "#xqora-chat-panel {" +
-    "position: fixed; bottom: 96px; right: 24px; width: 440px; max-width: calc(100vw - 32px);" +
-    "height: 680px; max-height: calc(100vh - 120px);" +
+    "position: fixed; bottom: 96px; right: 24px; width: 420px; max-width: min(90vw, calc(100vw - 32px));" +
+    "max-height: min(75vh, calc(100vh - 120px));" +
     "background: " + THEME.panelBg + ";" +
     "border-radius: " + THEME.radius + ";" +
     "box-shadow: " + THEME.shadow + ";" +
@@ -175,7 +175,7 @@
     "font-weight: 500; font-size: 11.5px; line-height: 1.2; color: " + THEME.teal + ";" +
     "}" +
     "#xqora-chat-messages {" +
-    "flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px;" +
+    "flex: 1; overflow-y: auto; padding: 14px 14px 16px; min-height: 320px; display: flex; flex-direction: column; gap: 10px;" +
     "background: " + THEME.panelBg + ";" +
     "}" +
     "@keyframes xqora-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }" +
