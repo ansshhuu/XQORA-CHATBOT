@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import CORS_ORIGINS, check_required_keys
 from app.database import init_db
-from app.routes import chat
+from app.routes import chat, feedback
 
 logger = logging.getLogger("xqora.main")
 
@@ -68,3 +68,4 @@ def health_check():
 
 
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(feedback.router, prefix="/feedback", tags=["feedback"])

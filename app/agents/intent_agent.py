@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from app.prompt import (
     BARE_CATEGORY_RESPONSE,
     CHECK_IN_RESPONSE,
+    CLARIFY_BARE_WORD_RESPONSE,
     EMPTY_INPUT_PROMPT,
     GREETING_RESPONSE,
     GUARDRAIL_REFUSAL_MESSAGE,
@@ -224,6 +225,43 @@ def _is_bare_category_word(message: str) -> bool:
     return stripped in _BARE_CATEGORY_WORDS
 
 
+_BARE_WORD_SHAPE_RE = re.compile(r"[A-Za-z][A-Za-z'\-]{1,29}")
+_TRAILING_SOFT_PUNCT_RE = re.compile(r"[.!]+$")
+
+
+def _bare_unclassified_word(message: str) -> str | None:
+    """Returns the stripped word if `message` is a single bare word - no
+    verb/question structure, not a recognized greeting, category, or
+    on-topic/service keyword - that on its own gives the AI classifier
+    nothing to go on. Recent_context-aware AI classification would otherwise
+    tend to just carry forward whatever topic the conversation was already
+    on (see INTENT_SYSTEM_PROMPT's short-reply-continues-context rule),
+    which is right for an actual short reply ("yeah a lot") but wrong for an
+    unrelated stray word like a name ("nikhil") that happens to arrive after
+    an unrelated topic. Returns None if this doesn't apply (multi-word
+    input, contains "?", or the word itself is already meaningful on its
+    own), so the caller falls through to normal classification.
+
+    Never used to name-match against a stored lead - that's a session-scoped
+    check orchestrator.py already owns (_own_info_reply) and runs before
+    classify_intent is even called, so a bare word that IS this session's
+    own stored name is handled as a self-recall there and never reaches
+    this function."""
+    stripped = message.strip()
+    if "?" in stripped:
+        return None
+    stripped = _TRAILING_SOFT_PUNCT_RE.sub("", stripped).strip()
+    if not _BARE_WORD_SHAPE_RE.fullmatch(stripped):
+        return None
+
+    lower = stripped.lower()
+    if lower in GREETING_WORDS or lower in _BARE_CATEGORY_WORDS:
+        return None
+    if lower in ON_TOPIC_KEYWORDS or _mentions_xqora_service(lower):
+        return None
+    return stripped
+
+
 
 _SELF_IDENTITY_RE = re.compile(
     r"^\s*(who\s+are\s+you|what\s+are\s+you|what\s+is\s+xqora\s+assistant|"
@@ -336,6 +374,12 @@ def classify_intent(
 
     if hard_escalate_signal(message):
         return IntentResult(intent="escalate", blocked=False)
+
+    bare_word = _bare_unclassified_word(message)
+    if bare_word is not None:
+        return IntentResult(
+            intent="off_topic", blocked=True, refusal_message=CLARIFY_BARE_WORD_RESPONSE.format(word=bare_word)
+        )
 
     if recent_context:
         classification_input = f"Recent conversation so far:\n{recent_context}\n\nLatest user message: {message}"

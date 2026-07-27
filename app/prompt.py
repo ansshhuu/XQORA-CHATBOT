@@ -20,6 +20,11 @@ EMPTY_INPUT_PROMPT = (
 
 BARE_CATEGORY_RESPONSE = "Sure, what would you like to know?"
 
+CLARIFY_BARE_WORD_RESPONSE = (
+    'Not sure what you mean by "{word}" - could you tell me a bit more about what '
+    "you're looking for?"
+)
+
 SELF_IDENTITY_RESPONSE = (
     "I'm XQORA's assistant, here to help with questions about our services, projects, "
     "pricing, and internships. If you need more than I can answer here, I can get you "

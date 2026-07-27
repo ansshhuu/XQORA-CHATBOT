@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.agents import feedback_agent
 from app.core.config import MAX_MESSAGE_LENGTH, RATE_LIMIT_PER_MINUTE
 from app.database import get_db
 from app.orchestrator import handle_message
@@ -52,6 +53,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
+    awaiting_feedback: bool = False
 
 
 def _enforce_rate_limit(key: str) -> None:
@@ -77,4 +79,5 @@ def handle_chat(
     _enforce_rate_limit(client_ip)
 
     reply = handle_message(db, session_id, request.message, background_tasks)
-    return ChatResponse(reply=reply, session_id=session_id)
+    awaiting_feedback = feedback_agent.is_awaiting_response(session_id)
+    return ChatResponse(reply=reply, session_id=session_id, awaiting_feedback=awaiting_feedback)

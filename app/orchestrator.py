@@ -4,6 +4,7 @@ aware), route to the matching specialist agent, and log the turn to Chat
 History.
 """
 import logging
+import re
 
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
@@ -12,7 +13,7 @@ from app.agents import feedback_agent
 from app.agents.escalation_agent import get_escalation_response
 from app.agents.faq_agent import get_faq_response
 from app.agents.intent_agent import classify_intent
-from app.agents.lead_agent import handle_lead_message, is_collecting
+from app.agents.lead_agent import LEAD_FIELDS, get_lead_info, handle_lead_message, is_collecting
 from app.agents.recommend_agent import get_recommendation_response
 from app.database import get_recent_chat_history, save_chat_history
 from app.prompt import CLOSING_RESPONSE, FEEDBACK_ASK
@@ -20,6 +21,136 @@ from app.prompt import CLOSING_RESPONSE, FEEDBACK_ASK
 logger = logging.getLogger("xqora.orchestrator")
 
 _RECENT_CONTEXT_TURNS = 3
+
+# Rule-based (no AI) "what's my X" self-recall check, run before intent
+# classification so a question about the user's own already-given lead info
+# never gets misrouted to the off-topic guardrail or an AI call - see
+# _own_info_reply below. Matches phrasing like "what's my email", "do you
+# know my name", "what did I tell you my phone number was", "what info do
+# you have on me", and broader identity-recall phrasing like "do you know
+# me", "do you remember me", "who am I".
+_OWN_INFO_RE = re.compile(
+    r"\b(?:what'?s?\s+my|what\s+is\s+my|do\s+you\s+(?:know|remember)\s+my|"
+    r"do\s+you\s+(?:know|remember)\s+(?:about\s+)?me\b|who\s+am\s+i\b|"
+    r"what\s+did\s+i\s+(?:tell|give)\s+you\s+(?:as\s+)?my|"
+    r"what\s+did\s+i\s+(?:tell|give)\s+you\b|"
+    r"what\s+(?:info|information|details)\s+(?:do\s+you\s+have|did\s+i\s+(?:give|share))\s+(?:about|on)\s+me|"
+    r"show\s+(?:me\s+)?my\s+(?:details|info|information)|"
+    r"remind\s+me\s+(?:of\s+)?my)\b",
+    re.IGNORECASE,
+)
+
+# "who is <name>" is only a self-recall question if <name> matches this
+# session's own stored lead name (checked in _own_info_reply, never another
+# session's) - anchored to the whole message so it doesn't false-positive on
+# unrelated questions like "who is the CEO of XQORA".
+_WHO_IS_RE = re.compile(r"^\s*who\s+is\s+([a-z][a-z'\-]*(?:\s+[a-z][a-z'\-]*)?)\s*\??\s*$", re.IGNORECASE)
+
+# A bare single word alone ("anshu") is only a self-recall trigger if it
+# matches this session's own stored lead name - same scoping as _WHO_IS_RE.
+# If it doesn't match, _own_info_reply returns None so the message falls
+# through to intent_agent's own bare-word clarify guard instead of being fed
+# to the AI classifier with recent_context, which would otherwise tend to
+# just carry forward whatever topic the conversation was already on.
+_BARE_WORD_RE = re.compile(r"^\s*([a-z][a-z'\-]{1,29})\s*[!.,]?\s*$", re.IGNORECASE)
+
+_OWN_INFO_FIELD_PATTERNS = [
+    ("name", re.compile(r"\bname\b", re.IGNORECASE)),
+    ("email", re.compile(r"e-?mail", re.IGNORECASE)),
+    ("phone", re.compile(r"\b(phone|mobile|contact\s+number)\b", re.IGNORECASE)),
+    ("company", re.compile(r"\b(company|organi[sz]ation|business)\b", re.IGNORECASE)),
+    ("message", re.compile(r"\b(need|require|looking\s+for|help\s+with)\b", re.IGNORECASE)),
+]
+
+_OWN_INFO_FIELD_LABELS = {
+    "name": "name",
+    "company": "company",
+    "email": "email",
+    "phone": "phone number",
+    "message": "what you needed help with",
+}
+
+
+def _detect_own_info_field(message: str) -> str | None:
+    """Returns the LEAD_FIELDS field name the message is asking about, "any"
+    for a generic "what do you know about me" style ask, or None if this
+    isn't a self-recall question at all."""
+    if not _OWN_INFO_RE.search(message):
+        return None
+    for field, pattern in _OWN_INFO_FIELD_PATTERNS:
+        if pattern.search(message):
+            return field
+    return "any"
+
+
+def _format_known_info(info: dict, prefix: str = "") -> str:
+    known = {k: v for k, v in info.items() if v and k in LEAD_FIELDS}
+    if not known:
+        return "You haven't shared any details with me yet in this chat."
+    parts = [f"{_OWN_INFO_FIELD_LABELS[k]}: {known[k]}" for k in LEAD_FIELDS if known.get(k)]
+    return prefix + "Here's what you've shared with me so far - " + "; ".join(parts) + "."
+
+
+def _casual_identity_reply(info: dict) -> str:
+    """Pattern A reply (bare name / "who is X") - a short ack referencing
+    just the last known need/topic, not the full field dump. Pattern B
+    (explicit "what info do you have"/"show my details" style requests)
+    keeps using _format_known_info instead - see _own_info_reply."""
+    name = info.get("name")
+    if not name:
+        return "You haven't shared any details with me yet in this chat."
+    need = info.get("message")
+    if need:
+        return f"Hey {name}! Last I noted, you were looking into {need} - want to continue that, or something else?"
+    return f"Hey {name}! Good to have you back - what can I help you with?"
+
+
+def _name_matches_stored(candidate: str, info: dict) -> bool:
+    stored_name = (info.get("name") or "").strip().lower()
+    return bool(stored_name) and (candidate == stored_name or candidate in stored_name.split())
+
+
+def _own_info_reply(session_id: str, message: str) -> str | None:
+    """If `message` is asking about the user's own previously-given lead
+    info, answers directly from this session's own stored state - checked
+    in-memory first, falling back to this session's own leads-table row if
+    the in-memory state was wiped by a restart/redeploy (see
+    lead_agent.get_lead_info; always scoped to this session_id, never a
+    DB-wide leads query) - and returns the reply text. Returns None if this
+    isn't a self-recall question, so the caller falls through to normal
+    classify_intent/AI handling."""
+    # Pattern A: bare name / "who is X" - casual ack, needs-only, not the
+    # full field dump (see _casual_identity_reply).
+    who_is_match = _WHO_IS_RE.match(message)
+    if who_is_match:
+        candidate = who_is_match.group(1).strip().lower()
+        info = get_lead_info(session_id)
+        if _name_matches_stored(candidate, info):
+            return _casual_identity_reply(info)
+        return None
+
+    bare_word_match = _BARE_WORD_RE.match(message)
+    if bare_word_match:
+        candidate = bare_word_match.group(1).strip().lower()
+        info = get_lead_info(session_id)
+        if _name_matches_stored(candidate, info):
+            return _casual_identity_reply(info)
+        return None
+
+    field = _detect_own_info_field(message)
+    if field is None:
+        return None
+
+    info = get_lead_info(session_id)
+
+    if field == "any":
+        return _format_known_info(info)
+
+    value = info.get(field)
+    if not value:
+        return "You haven't shared that with me yet."
+    return f"Your {_OWN_INFO_FIELD_LABELS[field]} is {value}."
+
 
 _ROUTES = {
     "faq": lambda db, session_id, message, background_tasks, recent_context: get_faq_response(
@@ -57,6 +188,10 @@ def _route(
     intent is in skip_handler_intents, the handler is not invoked (reply is
     None) - used to avoid re-running handle_lead_message when the caller
     already ran it once for this message."""
+    own_info_reply = _own_info_reply(session_id, message)
+    if own_info_reply is not None:
+        return own_info_reply, "own_info"
+
     rows = get_recent_chat_history(db, session_id, limit=_RECENT_CONTEXT_TURNS)
     recent_context = _build_recent_context(rows)
     previous_intent = rows[-1].intent if rows else None

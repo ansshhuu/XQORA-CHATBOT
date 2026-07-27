@@ -158,6 +158,50 @@ def reset(session_id: str) -> None:
         _session_locks.pop(session_id, None)
 
 
+def mark_declined(session_id: str) -> None:
+    """Latches this session as declined - used both when free-text couldn't
+    be parsed as a rating/comment, and when the feedback card is explicitly
+    cancelled from the widget. Either way, the prompt is not asked again."""
+    with _lock:
+        _feedback_state[session_id] = "declined"
+        _last_touch[session_id] = time.monotonic()
+
+
+def _mark_given(session_id: str) -> None:
+    with _lock:
+        _feedback_state[session_id] = "given"
+        _last_touch[session_id] = time.monotonic()
+
+
+_STRUCTURED_RATING_MAP = {"happy": 5, "ok": 3, "sad": 1}
+
+
+def record_structured_rating(
+    db: Session,
+    session_id: str,
+    rating: str,
+    reason: str | None = None,
+    comment: str | None = None,
+) -> FeedbackStepResult:
+    """Structured counterpart to handle_feedback_response, for the feedback
+    card UI - same deterministic, AI-free save path (save_feedback), just
+    fed a rating/reason/comment the user picked from the card instead of
+    free text to parse. `rating` is one of "happy"/"ok"/"sad" and is mapped
+    onto the same 1-5 integer scale the free-text path already uses, so
+    both paths land in the same Feedback.rating column.
+
+    Serialized per session_id for the same double-submit reason as
+    handle_feedback_response."""
+    with _get_session_lock(session_id):
+        int_rating = _STRUCTURED_RATING_MAP.get(rating)
+        if int_rating is None:
+            return FeedbackStepResult(reply="", handled=False)
+
+        save_feedback(db, session_id=session_id, rating=int_rating, comments=comment, reason=reason)
+        _mark_given(session_id)
+        return FeedbackStepResult(reply=FEEDBACK_THANKS_RATING, handled=True)
+
+
 def handle_feedback_response(db: Session, session_id: str, message: str) -> FeedbackStepResult:
     """Only call this when is_awaiting_response(session_id) is True.
 
@@ -187,14 +231,10 @@ def _handle_feedback_response_locked(db: Session, session_id: str, message: str)
             comments = None
 
     if rating is None and comments is None:
-        with _lock:
-            _feedback_state[session_id] = "declined"
-            _last_touch[session_id] = time.monotonic()
+        mark_declined(session_id)
         return FeedbackStepResult(reply="", handled=False)
 
     save_feedback(db, session_id=session_id, rating=rating, comments=comments)
-    with _lock:
-        _feedback_state[session_id] = "given"
-        _last_touch[session_id] = time.monotonic()
+    _mark_given(session_id)
     reply = FEEDBACK_THANKS_RATING if rating is not None else FEEDBACK_THANKS_COMMENT
     return FeedbackStepResult(reply=reply, handled=True)

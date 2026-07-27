@@ -9,7 +9,7 @@ from app.core.config import GROQ_API_KEY
 
 logger = logging.getLogger("xqora.ai_service")
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
 
 
 class AIServiceError(Exception):
@@ -35,6 +35,7 @@ def get_groq_response(message: str, system_prompt: str | None = None) -> str:
         completion = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
+            extra_body={"reasoning_format": "hidden"},
         )
     except Exception as exc:
         logger.warning("Groq call failed: %s", type(exc).__name__)

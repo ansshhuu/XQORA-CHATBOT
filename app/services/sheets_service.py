@@ -36,6 +36,11 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _client_lock = threading.Lock()
 _client = None
 
+HEADER_ROW = ["Name", "Company", "Email", "Phone", "Need", "Timestamp"]
+
+_header_ensured = False
+_header_lock = threading.Lock()
+
 
 def _load_credentials():
     from google.oauth2.service_account import Credentials
@@ -58,6 +63,24 @@ def _get_client():
     return _client
 
 
+def _ensure_header(worksheet) -> None:
+    """Insert the header row above row 1 if it's not already there. Covers
+    both a brand-new empty sheet and an existing sheet whose row 1 is
+    already a data row (insert_row shifts everything below it down, so
+    existing rows keep their relative order)."""
+    global _header_ensured
+    if _header_ensured:
+        return
+    with _header_lock:
+        if _header_ensured:
+            return
+        if worksheet.row_values(1) != HEADER_ROW:
+            worksheet.insert_row(HEADER_ROW, index=1)
+            worksheet.format("A1:F1", {"textFormat": {"bold": True}})
+            worksheet.freeze(rows=1)
+        _header_ensured = True
+
+
 def append_lead_row(name: str, company: str, email: str, phone: str, requirement: str) -> bool:
     if not GOOGLE_SHEETS_CREDENTIALS_PATH or not GOOGLE_SHEET_ID:
         logger.warning("Google Sheets not configured (missing credentials or sheet ID); skipping row append")
@@ -66,6 +89,7 @@ def append_lead_row(name: str, company: str, email: str, phone: str, requirement
     def _append() -> None:
         client = _get_client()
         worksheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        _ensure_header(worksheet)
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         worksheet.append_row([name, company, email, phone, requirement, timestamp])
 

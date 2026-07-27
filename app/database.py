@@ -84,6 +84,7 @@ class Feedback(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(128), index=True, nullable=False)
     rating = Column(Integer)
+    reason = Column(String(50))
     comments = Column(Text)
     date = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -130,11 +131,16 @@ def save_chat_history(db: Session, session_id: str, message: str, response: str,
 
 
 def save_feedback(
-    db: Session, session_id: str, rating: int | None = None, comments: str | None = None
+    db: Session,
+    session_id: str,
+    rating: int | None = None,
+    comments: str | None = None,
+    reason: str | None = None,
 ) -> Feedback:
     entry = Feedback(
         session_id=sanitize_input(session_id, 128),
         rating=rating,
+        reason=sanitize_input(reason, 50) if reason else None,
         comments=sanitize_input(comments, 2000) if comments else None,
     )
     db.add(entry)
@@ -190,6 +196,18 @@ def delete_stale_lead_sessions(db: Session, older_than: datetime) -> int:
     deleted = db.query(LeadSession).filter(LeadSession.updated_at < older_than).delete()
     db.commit()
     return deleted
+
+
+def get_latest_lead_by_session(db: Session, session_id: str) -> Lead | None:
+    """Most recent completed lead row for this session_id, or None. Strictly
+    scoped to the given session_id - callers must never omit the filter, so
+    this stays a same-session lookup and not a DB-wide leads scan."""
+    return (
+        db.query(Lead)
+        .filter(Lead.session_id == session_id)
+        .order_by(Lead.created_at.desc())
+        .first()
+    )
 
 
 def get_recent_chat_history(db: Session, session_id: str, limit: int = 3) -> list[ChatHistory]:

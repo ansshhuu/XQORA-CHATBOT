@@ -54,6 +54,7 @@ from app.database import (
     SessionLocal,
     delete_lead_session,
     delete_stale_lead_sessions,
+    get_latest_lead_by_session,
     load_lead_session,
     sanitize_input,
     save_lead_session,
@@ -335,13 +336,57 @@ def reset_session(session_id: str) -> None:
 
 
 def _store_completed_lead(session_id: str, state: dict) -> None:
+    # Stores all LEAD_FIELDS (not just _REUSE_FIELDS) so get_lead_info() can
+    # answer "what did I say I needed help with?" too, not just the
+    # name/company/email/phone subset the reuse-previous-details flow cares
+    # about. The reuse flow below only ever reads _REUSE_FIELDS back out of
+    # this dict, so the extra "message" key is inert there.
     with _completed_leads_lock:
-        _completed_leads[session_id] = {field: state.get(field) for field in _REUSE_FIELDS}
+        _completed_leads[session_id] = {field: state.get(field) for field in LEAD_FIELDS}
 
 
 def _get_completed_lead(session_id: str) -> dict | None:
     with _completed_leads_lock:
         return _completed_leads.get(session_id)
+
+
+def get_lead_info(session_id: str) -> dict:
+    """Read-only recall of this session's own previously-given lead info
+    (name/company/email/phone/message) for the "what's my name" style
+    self-recall check in orchestrator.py - works whether the form is still
+    in progress or already completed, preferring the live in-progress
+    state when one exists since it's the most current.
+
+    Strictly scoped to `session_id`: only ever reads this session's own
+    state, never another session's. Checks in-memory state first
+    (_sessions / _completed_leads), and only on a cache miss falls back to
+    the leads table (filtered by this session_id only - see
+    get_latest_lead_by_session) so a completed lead survives a restart or
+    worker recycle the same way an in-progress one already does via
+    lead_sessions. A DB hit is cached back into _completed_leads so repeat
+    asks in the same process don't re-hit the DB. Returns {} if this
+    session hasn't given anything yet, anywhere."""
+    with _sessions_lock:
+        in_progress = _sessions.get(session_id)
+        if in_progress is not None:
+            return {field: in_progress.get(field) for field in LEAD_FIELDS}
+
+    completed = _get_completed_lead(session_id)
+    if completed:
+        return dict(completed)
+
+    db = SessionLocal()
+    try:
+        lead = get_latest_lead_by_session(db, session_id)
+    finally:
+        db.close()
+
+    if lead is None:
+        return {}
+
+    info = {field: getattr(lead, field) for field in LEAD_FIELDS}
+    _store_completed_lead(session_id, info)
+    return info
 
 
 def is_collecting(session_id: str) -> bool:
