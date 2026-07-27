@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.agents import feedback_agent
 from app.core.config import MAX_MESSAGE_LENGTH, RATE_LIMIT_PER_MINUTE
 from app.database import get_db
-from app.orchestrator import handle_message
+from app.orchestrator import handle_message_with_intent
 
 router = APIRouter()
 
@@ -54,6 +54,7 @@ class ChatResponse(BaseModel):
     reply: str
     session_id: str
     awaiting_feedback: bool = False
+    is_greeting: bool = False
 
 
 def _enforce_rate_limit(key: str) -> None:
@@ -78,6 +79,11 @@ def handle_chat(
     client_ip = http_request.client.host if http_request.client else "unknown"
     _enforce_rate_limit(client_ip)
 
-    reply = handle_message(db, session_id, request.message, background_tasks)
+    reply, intent_label = handle_message_with_intent(db, session_id, request.message, background_tasks)
     awaiting_feedback = feedback_agent.is_awaiting_response(session_id)
-    return ChatResponse(reply=reply, session_id=session_id, awaiting_feedback=awaiting_feedback)
+    return ChatResponse(
+        reply=reply,
+        session_id=session_id,
+        awaiting_feedback=awaiting_feedback,
+        is_greeting=intent_label == "greeting",
+    )

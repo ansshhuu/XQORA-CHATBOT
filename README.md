@@ -49,7 +49,7 @@ xqora-chatbot/
 │   ├── routes/
 │   │   └── chat.py              # /chat endpoint: validation, rate limiting, session_id
 │   ├── services/
-│   │   ├── ai_service.py        # Groq model calls
+│   │   ├── ai_service.py        # Groq model calls (OpenRouter as one-shot fallback)
 │   │   ├── lead_service.py      # forwards leads via Resend (email)
 │   │   └── sheets_service.py    # appends leads to a Google Sheet (service account)
 │   └── core/
@@ -61,7 +61,8 @@ xqora-chatbot/
 │   ├── widget.js                # embeddable chat widget, no external dependencies
 │   └── test.html                # bare page for testing widget placement/behavior
 ├── tests/
-│   └── test_e2e.py              # end-to-end smoke test (see below)
+│   ├── test_e2e.py              # end-to-end smoke test (see below)
+│   └── test_chatbot_flows.py    # mocked pre-deploy gate, one command (see below)
 ├── requirements.txt
 ├── .env.example
 └── .gitignore
@@ -73,7 +74,7 @@ xqora-chatbot/
 python -m venv venv
 source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env          # fill in your Groq API key, Resend key, team email, and (optional) Google Sheets config
+cp .env.example .env          # fill in your Groq API key, OpenRouter API key (fallback), Resend key, team email, and (optional) Google Sheets config
 uvicorn app.main:app --reload
 ```
 
@@ -264,6 +265,43 @@ guardrail/routing/feedback regressions, it covers:
 ```bash
 python tests/test_e2e.py --mocked
 ```
+
+### Pre-deploy gate: `tests/test_chatbot_flows.py`
+
+```bash
+python tests/test_chatbot_flows.py
+```
+
+Fully mocked (no live Groq/Resend/Sheets calls), so it's fast and deterministic enough
+to run before every deploy - wire it into CI as one command, same as `test_e2e.py
+--mocked`. Covers, end-to-end through `/chat` and `/feedback/*` with both reply content
+*and* DB state asserted for each: the greeting, every widget quick-reply button (see
+`static/widget.js`'s `QUICK_REPLIES`), the FAQ/recommend/escalate workers, a full lead
+form from trigger to the `Leads` row + forwarding calls, mid-form cancellation,
+self-recall (bare name and an explicit "show my info" ask), the off-topic guardrail, the
+feedback card (all three faces, a reason chip, and cancel), the feedback free-text
+fallback, cross-session isolation, state surviving a simulated restart (both lead
+progress and, since [SESSION_STATE.md](SESSION_STATE.md)'s consolidation, the feedback
+ask-latch too), and a defensive check that a leaked AI reasoning trace (a raw
+`<think>...</think>` block) never reaches a user-facing reply - see
+`app/services/ai_service.py`'s `_strip_reasoning_leak`.
+
+## AI provider fallback
+
+`app/services/ai_service.py`'s `get_ai_response()` (the only entry point every agent
+calls — `intent_agent`, `faq_agent`, `recommend_agent`, `lead_agent`) tries Groq first
+and, only if that single call fails (timeout, rate limit, connection error, non-2xx,
+empty response), makes exactly one fallback attempt against OpenRouter
+(`OPENROUTER_API_KEY` in `.env`, model configurable via `OPENROUTER_MODEL`, defaults to
+`openai/gpt-oss-20b:free` — meta-llama's free Llama endpoints were pulled from
+OpenRouter's catalog, so double-check `openrouter.ai/models` before changing this to
+another `:free` model). No retry loop on either provider, so a genuinely down AI layer
+fails fast rather than hammering OpenRouter's free-tier 20 req/min cap. Every call logs
+which provider actually served the response (`served_by=groq` / `served_by=openrouter`)
+— useful for spotting how often the fallback is triggering. If OpenRouter also fails,
+`get_ai_response()` raises `AIServiceError` exactly as it always did with Groq alone,
+so each call site's existing keyword-matched/heuristic fallback (unchanged) is still the
+last resort.
 
 ## Security notes
 

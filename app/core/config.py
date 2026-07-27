@@ -8,6 +8,7 @@ load_dotenv()
 logger = logging.getLogger("xqora.config")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 TEAM_EMAIL = os.getenv("TEAM_EMAIL", "")
 

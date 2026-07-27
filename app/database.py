@@ -89,6 +89,24 @@ class Feedback(Base):
     date = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class FeedbackState(Base):
+    """Durable store for the feedback ask/declined/given latch, keyed by
+    session_id - the counterpart to LeadSession, but for feedback_agent's
+    state instead of lead_agent's. Before this table existed, that latch
+    lived only in feedback_agent's in-memory dict, so a restart mid-flow
+    would forget a session had already been asked and could ask (or save)
+    it twice. session_service.py loads/saves this on every ask/decline/give,
+    the same way it does for LeadSession."""
+
+    __tablename__ = "feedback_states"
+
+    session_id = Column(String(128), primary_key=True)
+    status = Column(String(20), nullable=False)  # "asked" | "declined" | "given"
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
@@ -208,6 +226,39 @@ def get_latest_lead_by_session(db: Session, session_id: str) -> Lead | None:
         .order_by(Lead.created_at.desc())
         .first()
     )
+
+
+def load_feedback_state(db: Session, session_id: str) -> str | None:
+    """Returns the persisted feedback ask/declined/given latch for
+    `session_id`, or None if nothing's been saved for it (never asked, or
+    already swept as stale)."""
+    row = db.get(FeedbackState, session_id)
+    return row.status if row is not None else None
+
+
+def save_feedback_state(db: Session, session_id: str, status: str) -> None:
+    row = db.get(FeedbackState, session_id)
+    if row is None:
+        row = FeedbackState(session_id=session_id, status=status)
+        db.add(row)
+    else:
+        row.status = status
+    db.commit()
+
+
+def delete_feedback_state(db: Session, session_id: str) -> None:
+    row = db.get(FeedbackState, session_id)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+
+def delete_stale_feedback_states(db: Session, older_than: datetime) -> int:
+    """Clears feedback ask/declined/given latches last touched before
+    `older_than`, mirroring delete_stale_lead_sessions."""
+    deleted = db.query(FeedbackState).filter(FeedbackState.updated_at < older_than).delete()
+    db.commit()
+    return deleted
 
 
 def get_recent_chat_history(db: Session, session_id: str, limit: int = 3) -> list[ChatHistory]:

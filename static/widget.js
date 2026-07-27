@@ -30,6 +30,8 @@
   // in its place when awaiting_feedback comes back true.
   var FEEDBACK_ASK_TEXT = "Before you go, how'd this chat go? (1-5, or just tell me)";
 
+  var GREETING_TEXT = "Hey there! What can I help you with today?";
+
   var QUICK_REPLIES = [
     "I want to hire you",
     "Tell me your services",
@@ -123,11 +125,17 @@
     "border-radius: 50%; background: " + THEME.teal + ";" +
     "box-shadow: " + THEME.bubbleShadow + ";" +
     "display: flex; align-items: center; justify-content: center;" +
-    "cursor: pointer; z-index: 2147483000; border: none;" +
+    "cursor: pointer; z-index: 2147483000; border: none; padding: 0;" +
+    "overflow: hidden; box-sizing: border-box;" +
     "transition: transform 0.15s ease, box-shadow 0.15s ease;" +
     "}" +
     "#xqora-chat-bubble:hover { transform: scale(1.08); box-shadow: 0 8px 22px rgba(20, 184, 166, 0.6); }" +
+    "#xqora-chat-bubble.xqora-bubble-open { background: " + THEME.navy + "; }" +
     "#xqora-chat-bubble svg { width: 28px; height: 28px; }" +
+    "#xqora-chat-bubble img {" +
+    "width: 100%; height: 100%; border-radius: 50%;" +
+    "object-fit: cover; object-position: center; display: block;" +
+    "}" +
     "#xqora-chat-panel {" +
     "position: fixed; bottom: 96px; right: 24px; width: 440px; max-width: calc(100vw - 32px);" +
     "height: 680px; max-height: calc(100vh - 120px);" +
@@ -256,6 +264,9 @@
     "}" +
     ".xqora-feedback-submit:hover:not(:disabled) { background: " + THEME.tealDark + "; }" +
     ".xqora-feedback-submit:disabled { opacity: 0.45; cursor: not-allowed; }" +
+    ".xqora-auto-restart-note {" +
+    "width: 100%; font-size: 12px; color: #64748b; padding: 0 2px 2px;" +
+    "}" +
     "#xqora-chat-inputbar {" +
     "display: flex; gap: 8px; padding: 10px; background: " + THEME.white + ";" +
     "border-top: 1px solid #e2e8f0; flex-shrink: 0;" +
@@ -293,22 +304,20 @@
     "}";
   document.head.appendChild(style);
 
-  var CHAT_ICON_SVG =
-    '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-    '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" stroke="#ffffff" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>' +
-    '<circle cx="8" cy="12" r="1" fill="#ffffff"/>' +
-    '<circle cx="12" cy="12" r="1" fill="#ffffff"/>' +
-    '<circle cx="16" cy="12" r="1" fill="#ffffff"/>' +
-    "</svg>";
+  // Launcher bubble icon (before the widget opens) is the same bot logo used
+  // in the header/message avatars, filling the circular button - "#xqora-chat-bubble
+  // img" above gives it the object-fit: cover crop, same treatment as
+  // ".xqora-logo"/".xqora-bot-avatar". Swapped for CLOSE_ICON_SVG once open.
+  var CHAT_ICON_IMG_HTML = '<img src="' + AVATAR_URL + '" alt="XQORA" />';
   var CLOSE_ICON_SVG =
     '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-    '<path d="M6 6l12 12M18 6L6 18" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>' +
+    '<path d="M6 6l12 12M18 6L6 18" stroke="' + THEME.white + '" stroke-width="2" stroke-linecap="round"/>' +
     "</svg>";
 
   var bubble = document.createElement("button");
   bubble.id = "xqora-chat-bubble";
   bubble.setAttribute("aria-label", "Open XQORA chat");
-  bubble.innerHTML = CHAT_ICON_SVG;
+  bubble.innerHTML = CHAT_ICON_IMG_HTML;
 
   var panel = document.createElement("div");
   panel.id = "xqora-chat-panel";
@@ -339,6 +348,16 @@
   var messagesEl = panel.querySelector("#xqora-chat-messages");
   var inputEl = panel.querySelector("#xqora-chat-input");
   var sendBtn = panel.querySelector("#xqora-chat-send");
+  var inputBarEl = panel.querySelector("#xqora-chat-inputbar");
+
+  // Hides/disables the input bar entirely (not just visually near the
+  // "Start new chat" action) once a conversation has ended - re-shown by
+  // startNewChat() when the fresh conversation begins.
+  function setInputBarVisible(visible) {
+    inputBarEl.style.display = visible ? "" : "none";
+    inputEl.disabled = !visible;
+    sendBtn.disabled = !visible || isSending;
+  }
 
   function addQuickReplies() {
     var row = document.createElement("div");
@@ -355,6 +374,80 @@
     });
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  var AUTO_RESTART_DELAY_MS = 2500;
+
+  // Ends the current conversation in the UI: input bar is fully hidden (not
+  // just a button placed near it) so it can't be used until a new chat
+  // starts. When autoRestart is true (the post-feedback-submit path), a
+  // fresh conversation starts on its own after a short delay so the user
+  // doesn't have to click anything; the button still doubles as an
+  // immediate override for anyone who doesn't want to wait.
+  function addNewChatAction(autoRestart) {
+    setInputBarVisible(false);
+
+    var row = document.createElement("div");
+    row.className = "xqora-quick-replies-row";
+
+    var autoTimer = null;
+
+    if (autoRestart) {
+      var note = document.createElement("div");
+      note.className = "xqora-auto-restart-note";
+      note.textContent = "Starting a new chat...";
+      row.appendChild(note);
+    }
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "xqora-quick-reply-btn";
+    btn.textContent = autoRestart ? "Start new chat now" : "Start new chat";
+    btn.addEventListener("click", function () {
+      if (autoTimer) clearTimeout(autoTimer);
+      row.remove();
+      startNewChat();
+    });
+    row.appendChild(btn);
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    if (autoRestart) {
+      autoTimer = setTimeout(function () {
+        row.remove();
+        startNewChat();
+      }, AUTO_RESTART_DELAY_MS);
+    }
+  }
+
+  // Resets the widget to a fresh conversation entirely in place - no
+  // window.location.reload(), so the panel/open state, scroll position,
+  // and rest of the host page are undisturbed. Clears this session's
+  // rendered messages and its sessionStorage history/feedback-pending
+  // entries, then rotates to a brand new session_id (same generation logic
+  // as the initial-load one above) *before* rendering anything new, so the
+  // fresh greeting/quick-replies get saved under the new session's history
+  // key instead of the old one, and the next /chat request sent afterward
+  // carries the new session_id - the backend (see app/routes/chat.py) just
+  // takes whatever session_id it's given, so a new id there is genuinely a
+  // new orchestrator session with no leftover lead/feedback state attached.
+  function startNewChat() {
+    removeFeedbackCard();
+    _storageRemove(_historyKey());
+    _storageRemove(_feedbackPendingKey());
+
+    if (window.crypto && window.crypto.randomUUID) {
+      sessionId = window.crypto.randomUUID();
+    } else {
+      sessionId = "xqora-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+    }
+    _storageSet(SESSION_ID_STORAGE_KEY, sessionId);
+
+    setInputBarVisible(true);
+    messagesEl.innerHTML = "";
+    addMessage(GREETING_TEXT, "bot");
+    addQuickReplies();
+    inputEl.focus();
   }
 
   function removeFeedbackCard() {
@@ -463,6 +556,7 @@
 
     cancelBtn.addEventListener("click", function () {
       removeFeedbackCard();
+      addNewChatAction();
       fetch(FEEDBACK_CANCEL_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -495,10 +589,12 @@
           if (result.ok && result.data && result.data.reply) {
             addMessage(result.data.reply, "bot");
           }
+          addNewChatAction(true);
         })
         .catch(function () {
           removeFeedbackCard();
           addMessage("Thanks for the feedback!", "bot");
+          addNewChatAction(true);
         });
     });
   }
@@ -551,7 +647,8 @@
   }
 
   function updateBubbleIcon() {
-    bubble.innerHTML = isOpen ? CLOSE_ICON_SVG : CHAT_ICON_SVG;
+    bubble.innerHTML = isOpen ? CLOSE_ICON_SVG : CHAT_ICON_IMG_HTML;
+    bubble.classList.toggle("xqora-bubble-open", isOpen);
     bubble.setAttribute("aria-label", isOpen ? "Close XQORA chat" : "Open XQORA chat");
   }
 
@@ -560,7 +657,7 @@
     panel.classList.add("xqora-open");
     updateBubbleIcon();
     if (messagesEl.children.length === 0) {
-      addMessage("Hey there! What can I help you with today?", "bot");
+      addMessage(GREETING_TEXT, "bot");
       addQuickReplies();
     }
     inputEl.focus();
@@ -652,6 +749,11 @@
             addFeedbackCard();
           } else {
             addMessage(result.data.reply, "bot");
+            // Quick replies are tied to "the greeting is the latest bot
+            // reply", not "this is the very first message ever" - so they
+            // reappear any time the user re-triggers the greeting (e.g.
+            // typing "hi" again mid-conversation), not just on session start.
+            if (result.data.is_greeting) addQuickReplies();
           }
         } else {
           addMessage("Sorry, something went wrong. Please try again in a moment.", "bot");

@@ -26,41 +26,26 @@ resumes from wherever it paused rather than restarting.
 Users can also bail out of collection entirely at any step ("never mind",
 "cancel", "stop") - see _is_cancel_request.
 
-Session progress is held in an in-memory dict, keyed by session_id, for fast
-same-process access - but that dict is only a cache now, not the source of
-truth: every mutating turn also persists the state to the lead_sessions
-table (see _persist_session / database.save_lead_session), and a cache miss
-(fresh session, or a session that predates this process - e.g. right after a
-restart) reads it back from there (see _get_session / database.load_lead_session)
-instead of starting over. That's what makes an in-progress form survive a
-server restart. A multi-worker/multi-instance deployment would still need a
-shared cache (e.g. Redis) in front of the DB to avoid every request round-
-tripping to it, but correctness no longer depends on the in-memory dict
-surviving.
+Session progress (in-progress fields, the completed-lead recall cache, and
+the "who's currently mid-collection" flag) is owned by
+app.services.session_service now - see SESSION_STATE.md for the full flow.
+This module only holds the lead-collection state *machine* (which field is
+asked next, validation, AI plausibility checks); session_service owns where
+that state actually lives, including the in-memory-cache-in-front-of-DB
+pattern that used to be reimplemented here directly.
 """
 import logging
 import re
-import threading
-import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
-from app.core.config import SESSION_TTL_SECONDS
-from app.database import (
-    Lead,
-    SessionLocal,
-    delete_lead_session,
-    delete_stale_lead_sessions,
-    get_latest_lead_by_session,
-    load_lead_session,
-    sanitize_input,
-    save_lead_session,
-)
+from app.database import Lead, SessionLocal, sanitize_input
+from app.services import session_service
 from app.services.ai_service import AIServiceError, get_ai_response
 from app.services.lead_service import forward_lead
+from app.services.session_service import LEAD_FIELDS
 from app.services.sheets_service import append_lead_row
 from app.utils import is_bare_greeting
 
@@ -70,11 +55,8 @@ logger = logging.getLogger("xqora.lead_agent")
 @dataclass
 class LeadStepResult:
     reply: str
-    consumed: bool  
-    finalized: bool = False 
-
-
-LEAD_FIELDS = ["name", "company", "email", "phone", "message"]
+    consumed: bool
+    finalized: bool = False
 
 FIELD_PROMPTS = {
     "name": "What's your name?",
@@ -208,217 +190,23 @@ def _resume_nudge(field: str) -> str:
     return f"Got it! Picking back up on getting you connected with the team. {FIELD_PROMPTS[field]}"
 
 
-_sessions_lock = threading.Lock()
-_sessions: dict[str, dict] = {}
-
-_session_locks_lock = threading.Lock()
-_session_locks: dict[str, threading.Lock] = {}
-
-
-def _get_session_lock(session_id: str) -> threading.Lock:
-    with _session_locks_lock:
-        return _session_locks.setdefault(session_id, threading.Lock())
-
-
-_completed_leads_lock = threading.Lock()
-_completed_leads: dict[str, dict] = {}
-
-_SWEEP_INTERVAL_SECONDS = 300
-
-_touch_lock = threading.Lock()
-_last_touch: dict[str, float] = {}
-_last_sweep = 0.0
-
-
-def _touch(session_id: str) -> None:
-    """Record activity for `session_id` so a TTL sweep won't evict it while
-    it's still in use."""
-    with _touch_lock:
-        _last_touch[session_id] = time.monotonic()
-
-
-def _sweep_expired_sessions(now: float) -> None:
-    """Evict session state (collection progress, completed-lead reuse
-    details, per-session locks) that's been untouched for over
-    SESSION_TTL_SECONDS, so a long-running instance doesn't accumulate one
-    entry per visitor forever. Runs at most once per _SWEEP_INTERVAL_SECONDS,
-    triggered opportunistically off real traffic (see is_collecting below)
-    rather than a background thread/timer.
-
-    Also clears matching rows out of the lead_sessions table, on the same
-    cadence but keyed off the DB's own updated_at column rather than the
-    in-memory touch times - that way an abandoned form from BEFORE this
-    process started (so it was never touched in this process's _last_touch
-    at all) still eventually gets cleaned up, not just ones evicted from the
-    in-memory cache this run."""
-    global _last_sweep
-    with _touch_lock:
-        if now - _last_sweep < _SWEEP_INTERVAL_SECONDS:
-            return
-        _last_sweep = now
-        expired = [sid for sid, ts in _last_touch.items() if now - ts > SESSION_TTL_SECONDS]
-        for sid in expired:
-            del _last_touch[sid]
-
-    if expired:
-        with _sessions_lock:
-            for sid in expired:
-                _sessions.pop(sid, None)
-        with _completed_leads_lock:
-            for sid in expired:
-                _completed_leads.pop(sid, None)
-        with _session_locks_lock:
-            for sid in expired:
-                _session_locks.pop(sid, None)
-
-    db = SessionLocal()
-    try:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=SESSION_TTL_SECONDS)
-        delete_stale_lead_sessions(db, cutoff)
-    except Exception:
-        logger.exception("Stale lead_sessions cleanup failed")
-    finally:
-        db.close()
-
-
-def _get_session(session_id: str) -> dict:
-    """In-memory session state for the current process. On a cache miss,
-    falls back to the persisted lead_sessions row (see database.py) before
-    defaulting to a blank state - this is what lets an in-progress form
-    resume correctly after a restart wiped the in-memory cache. Callers that
-    mutate the returned dict are responsible for persisting the change via
-    _persist_session using their own request-scoped db session; this
-    function only needs a short-lived connection of its own for the (
-    uncommon) read-through fallback."""
-    _touch(session_id)
-    with _sessions_lock:
-        state = _sessions.get(session_id)
-        if state is not None:
-            return state
-
-    db = SessionLocal()
-    try:
-        loaded = load_lead_session(db, session_id)
-    finally:
-        db.close()
-
-    state = {field: None for field in LEAD_FIELDS}
-    if loaded:
-        for field in LEAD_FIELDS:
-            state[field] = loaded.get(field)
-        state["_awaiting"] = loaded.get("_awaiting")
-
-    with _sessions_lock:
-        return _sessions.setdefault(session_id, state)
-
-
-def _persist_session(db: Session, session_id: str, state: dict) -> None:
-    """Saves the current in-progress state to the lead_sessions table using
-    the caller's request-scoped db session. Called on every turn that
-    mutates `state`, so a restart between turns never loses more than the
-    single in-flight message."""
-    save_lead_session(db, session_id, state)
-
-
-def reset_session(session_id: str) -> None:
-    with _sessions_lock:
-        _sessions.pop(session_id, None)
-    with _session_locks_lock:
-        _session_locks.pop(session_id, None)
-    with _touch_lock:
-        _last_touch.pop(session_id, None)
-
-    db = SessionLocal()
-    try:
-        delete_lead_session(db, session_id)
-    finally:
-        db.close()
-
-
-def _store_completed_lead(session_id: str, state: dict) -> None:
-    # Stores all LEAD_FIELDS (not just _REUSE_FIELDS) so get_lead_info() can
-    # answer "what did I say I needed help with?" too, not just the
-    # name/company/email/phone subset the reuse-previous-details flow cares
-    # about. The reuse flow below only ever reads _REUSE_FIELDS back out of
-    # this dict, so the extra "message" key is inert there.
-    with _completed_leads_lock:
-        _completed_leads[session_id] = {field: state.get(field) for field in LEAD_FIELDS}
-
-
-def _get_completed_lead(session_id: str) -> dict | None:
-    with _completed_leads_lock:
-        return _completed_leads.get(session_id)
-
-
 def get_lead_info(session_id: str) -> dict:
-    """Read-only recall of this session's own previously-given lead info
-    (name/company/email/phone/message) for the "what's my name" style
-    self-recall check in orchestrator.py - works whether the form is still
-    in progress or already completed, preferring the live in-progress
-    state when one exists since it's the most current.
-
-    Strictly scoped to `session_id`: only ever reads this session's own
-    state, never another session's. Checks in-memory state first
-    (_sessions / _completed_leads), and only on a cache miss falls back to
-    the leads table (filtered by this session_id only - see
-    get_latest_lead_by_session) so a completed lead survives a restart or
-    worker recycle the same way an in-progress one already does via
-    lead_sessions. A DB hit is cached back into _completed_leads so repeat
-    asks in the same process don't re-hit the DB. Returns {} if this
-    session hasn't given anything yet, anywhere."""
-    with _sessions_lock:
-        in_progress = _sessions.get(session_id)
-        if in_progress is not None:
-            return {field: in_progress.get(field) for field in LEAD_FIELDS}
-
-    completed = _get_completed_lead(session_id)
-    if completed:
-        return dict(completed)
-
-    db = SessionLocal()
-    try:
-        lead = get_latest_lead_by_session(db, session_id)
-    finally:
-        db.close()
-
-    if lead is None:
-        return {}
-
-    info = {field: getattr(lead, field) for field in LEAD_FIELDS}
-    _store_completed_lead(session_id, info)
-    return info
+    """Read-only recall of this session's own previously-given lead info -
+    thin pass-through to session_service, kept here so orchestrator.py's
+    existing `from app.agents.lead_agent import get_lead_info` doesn't need
+    to change. See session_service.get_lead_info for the actual cache/DB
+    cascade."""
+    return session_service.get_lead_info(session_id)
 
 
 def is_collecting(session_id: str) -> bool:
-    """True if this session is mid-way through lead collection.
-
-    Lets the orchestrator route straight back into lead_agent on the next
-    turn instead of re-running intent classification, which would otherwise
+    """True if this session is mid-way through lead collection - lets the
+    orchestrator route straight back into lead_agent on the next turn
+    instead of re-running intent classification, which would otherwise
     misroute or guardrail-block plain answers like "John Doe" or a bare
-    email address.
-
-    Called on every turn by the orchestrator regardless of session, which
-    also makes it a convenient place to piggyback the TTL sweep so expired
-    session state gets cleaned up off ordinary traffic.
-
-    Checked against the in-memory cache first; on a miss, falls back to the
-    persisted lead_sessions row so a form still mid-collection when the
-    server restarted is correctly recognized as such on the very next
-    message, instead of that message being misrouted through normal intent
-    classification because the in-memory cache came back empty.
-    """
-    _sweep_expired_sessions(time.monotonic())
-    with _sessions_lock:
-        state = _sessions.get(session_id)
-    if state is not None:
-        return bool(state.get("_awaiting"))
-
-    db = SessionLocal()
-    try:
-        loaded = load_lead_session(db, session_id)
-    finally:
-        db.close()
-    return bool(loaded and loaded.get("_awaiting"))
+    email address. Thin pass-through to session_service; see
+    session_service.is_collecting for the cache/DB cascade."""
+    return session_service.is_collecting(session_id)
 
 
 def _next_missing_field(state: dict) -> str | None:
@@ -503,8 +291,8 @@ def _finalize_lead(db: Session, session_id: str, state: dict, background_tasks: 
         _forward_lead_async, lead.id, lead.name or "", lead.company or "", lead.email or "", lead.phone or "", need
     )
 
-    _store_completed_lead(session_id, state)
-    reset_session(session_id)
+    session_service.store_completed_lead(session_id, state)
+    session_service.reset_lead_state(session_id)
     return LeadStepResult(reply="Thanks, got it! Our team will reach out to you shortly.", consumed=True, finalized=True)
 
 
@@ -527,31 +315,31 @@ def handle_lead_message(
     (double-clicked send, a client retry) can't race on the session's dict -
     e.g. both reading a field as unfilled and both writing to it, or both
     finalizing the same lead."""
-    with _get_session_lock(session_id):
+    with session_service.get_session_lock(session_id):
         return _handle_lead_message_locked(db, session_id, message, background_tasks)
 
 
 def _handle_lead_message_locked(
     db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
 ) -> LeadStepResult:
-    state = _get_session(session_id)
+    state = dict(session_service.get_lead_state(session_id))
     pending_field = state.get("_awaiting")
 
-    if pending_field is None and _next_missing_field(state) == "name" and _get_completed_lead(session_id):
+    if pending_field is None and _next_missing_field(state) == "name" and session_service.get_completed_lead(session_id):
         state["_awaiting"] = "_reuse_confirm"
-        _persist_session(db, session_id, state)
+        session_service.update_lead_state(session_id, state, db=db)
         return LeadStepResult(reply=REUSE_DETAILS_PROMPT, consumed=True)
 
     if pending_field:
         stripped = message.strip()
 
         if _is_cancel_request(stripped):
-            reset_session(session_id)
+            session_service.reset_lead_state(session_id)
             return LeadStepResult(reply=CANCEL_MESSAGE, consumed=True)
 
         if pending_field == "_reuse_confirm":
             if _wants_reuse(stripped):
-                prev = _get_completed_lead(session_id) or {}
+                prev = session_service.get_completed_lead(session_id) or {}
                 for field in _REUSE_FIELDS:
                     state[field] = prev.get(field)
             elif not _wants_new_details(stripped):
@@ -587,6 +375,6 @@ def _handle_lead_message_locked(
 
     next_step = _advance_to_next_field(state)
     if next_step is not None:
-        _persist_session(db, session_id, state)
+        session_service.update_lead_state(session_id, state, db=db)
         return next_step
     return _finalize_lead(db, session_id, state, background_tasks)

@@ -10,8 +10,19 @@ GUARDRAIL_REFUSAL_MESSAGE = (
     "team's got you at xqoratechnologies@gmail.com."
 )
 
+# Shown only when both AI providers (Groq and its OpenRouter fallback - see
+# ai_service.py) are genuinely unavailable for the AI-guess classification
+# step - an honest "can't process this right now" rather than a guessed
+# intent with fabricated content behind it. See intent_agent.classify_intent.
+AI_UNAVAILABLE_RESPONSE = (
+    "I'm having trouble processing that right now, you can try again in a moment, "
+    "or reach us directly at xqoratechnologies@gmail.com."
+)
+
 GREETING_RESPONSE = (
-    "Hey! What's on your mind, a project idea, a question about XQORA, or something else?"
+    "Hey! I'm XQORA's assistant, happy to help with project ideas, our services like web "
+    "and app development, AI automation and chatbots, or cloud solutions, pricing, or "
+    "internships. What can I help you with?"
 )
 
 EMPTY_INPUT_PROMPT = (

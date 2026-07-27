@@ -40,6 +40,7 @@ import re
 from dataclasses import dataclass
 
 from app.prompt import (
+    AI_UNAVAILABLE_RESPONSE,
     BARE_CATEGORY_RESPONSE,
     CHECK_IN_RESPONSE,
     CLARIFY_BARE_WORD_RESPONSE,
@@ -168,10 +169,14 @@ _GREETING_RE = re.compile(
 
 _GREETING_RESPONSES = (
     GREETING_RESPONSE,
-    "Hey! What's up, anything I can help with?",
-    "Hi there! What brings you by today?",
-    "Hey, good to see you! What's on your mind?",
-    "Hello! Got a project or question for me?",
+    "Hi there! I can help with project ideas, our services (web and app development, AI "
+    "automation and chatbots, cloud solutions), pricing, or internships. What brings you by today?",
+    "Hey, good to see you! Whether it's a project idea, questions about our services, "
+    "pricing, or internships, I'm happy to help. What's on your mind?",
+    "Hello! I'm XQORA's assistant, here for project ideas, service questions (web, "
+    "software, AI automation, cloud), pricing, or internships. Got something for me?",
+    "Hey! I can walk you through XQORA's services, pricing, or internships, or help "
+    "shape a project idea, just tell me what you need.",
 )
 
 _NON_WORD_RE = re.compile(r"[^\w]")
@@ -389,8 +394,20 @@ def classify_intent(
     try:
         raw = get_ai_response(classification_input, system_prompt=INTENT_SYSTEM_PROMPT)
     except AIServiceError:
-        logger.warning("Intent classification AI call failed; defaulting to faq")
-        return IntentResult(intent="faq", blocked=False)
+        # get_ai_response only raises after Groq AND its OpenRouter fallback
+        # have both already failed (see ai_service.py) - genuine total AI
+        # outage, not an ordinary no-match. Defaulting to "faq" here used to
+        # route this straight into get_faq_response, which would itself hit
+        # the same outage and fall back to a keyword-matched (or generic)
+        # answer that reads as a real, grounded reply to an unrelated
+        # question - a fabricated-looking answer is worse than an honest
+        # "can't process this right now". Logged at error level with a
+        # distinct, greppable marker so a real double-provider outage is
+        # easy to spot in logs/monitoring, separate from the per-provider
+        # warnings ai_service.py already logs for an ordinary single-call
+        # failure.
+        logger.error("both_ai_providers_down: intent classification unavailable, returning safe fallback")
+        return IntentResult(intent="ai_unavailable", blocked=True, refusal_message=AI_UNAVAILABLE_RESPONSE)
 
     label = re.sub(r"[^a-z_]", "", raw.strip().lower())
     if label not in VALID_INTENTS:

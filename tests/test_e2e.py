@@ -31,7 +31,9 @@ from app.agents import faq_agent, feedback_agent, lead_agent, recommend_agent  #
 from app.agents.intent_agent import classify_intent, hard_escalate_signal, _is_unrelated_professional_service  # noqa: E402
 from app.database import ChatHistory, Feedback, Lead, SessionLocal, engine, load_lead_session  # noqa: E402
 from app.orchestrator import handle_message  # noqa: E402
+from app.services import session_service  # noqa: E402
 from app.prompt import (  # noqa: E402
+    AI_UNAVAILABLE_RESPONSE,
     BARE_CATEGORY_RESPONSE,
     CHECK_IN_RESPONSE,
     FEEDBACK_ASK,
@@ -324,7 +326,26 @@ def main():
         })
         check("Off-flow aside: HTTP 200", r.status_code == 200, r.text)
         aside_reply = r.json()["reply"]
-        check("Off-flow aside: nudges back toward the paused name field", "name" in aside_reply.lower(), aside_reply)
+        aside_row = last_chat_history_row(offflow_session)
+        # This message matches _is_unrelated_professional_service, a
+        # deterministic pre-AI guardrail check (see intent_agent.py) - the
+        # resulting intent is always "off_topic" regardless of what the AI
+        # says, so asserting on the logged intent is not flaky the way
+        # asserting on the AI-generated reply text would be. (Off-topic
+        # asides deliberately do NOT get a "back to the name field" nudge
+        # appended - see orchestrator.py's off_topic branch - so checking
+        # for "name" in the reply text was actually asserting behavior this
+        # app intentionally does NOT do for a guardrail-blocked aside.)
+        check(
+            "Off-flow aside: routed off-topic, not swallowed as the lead's name",
+            aside_row is not None and aside_row.intent == "off_topic",
+            f"reply={aside_reply!r} row={aside_row}",
+        )
+        check(
+            "Off-flow aside: lead flow still paused afterward (not corrupted)",
+            lead_agent.is_collecting(offflow_session),
+            None,
+        )
 
         db = SessionLocal()
         try:
@@ -361,20 +382,20 @@ def main():
         # routed the opening message to "lead" - isolates the actual fix
         # (field-plausibility detection) from that separate routing step.
         bug_session_a = "regression-need-somewhere-to-host"
-        state_a = lead_agent._get_session(bug_session_a)
+        state_a = session_service.get_lead_state(bug_session_a)
         state_a["name"] = "Alex Kumar"
         state_a["_awaiting"] = "company"
         r = _post(client, {"message": "need somewhere to host my app", "session_id": bug_session_a})
         check("Bug report phrase A: HTTP 200", r.status_code == 200, r.text)
         check(
             "Bug report phrase A: NOT silently accepted as the company name",
-            lead_agent._sessions[bug_session_a]["company"] is None
-            and lead_agent._sessions[bug_session_a]["_awaiting"] == "company",
-            lead_agent._sessions[bug_session_a],
+            session_service._lead_cache.peek(bug_session_a)["company"] is None
+            and session_service._lead_cache.peek(bug_session_a)["_awaiting"] == "company",
+            session_service._lead_cache.peek(bug_session_a),
         )
 
         bug_session_b = "regression-want-an-app"
-        state_b = lead_agent._get_session(bug_session_b)
+        state_b = session_service.get_lead_state(bug_session_b)
         state_b["name"] = "Alex Kumar"
         state_b["company"] = "Acme Corp"
         state_b["_awaiting"] = "email"
@@ -382,17 +403,17 @@ def main():
         check("Bug report phrase B: HTTP 200", r.status_code == 200, r.text)
         check(
             "Bug report phrase B: NOT silently accepted as the email",
-            lead_agent._sessions[bug_session_b]["email"] is None
-            and lead_agent._sessions[bug_session_b]["_awaiting"] == "email",
-            lead_agent._sessions[bug_session_b],
+            session_service._lead_cache.peek(bug_session_b)["email"] is None
+            and session_service._lead_cache.peek(bug_session_b)["_awaiting"] == "email",
+            session_service._lead_cache.peek(bug_session_b),
         )
-        lead_agent.reset_session(bug_session_a)
-        lead_agent.reset_session(bug_session_b)
+        session_service.reset_lead_state(bug_session_a)
+        session_service.reset_lead_state(bug_session_b)
 
         # 9c. Explicit bail-out: "never mind" mid-flow should cancel and
         # reset, not be swallowed as a field value.
         cancel_session = "regression-cancel"
-        state_c = lead_agent._get_session(cancel_session)
+        state_c = session_service.get_lead_state(cancel_session)
         state_c["name"] = "Someone"
         state_c["_awaiting"] = "company"
         r = _post(client, {"message": "never mind", "session_id": cancel_session})
@@ -481,17 +502,34 @@ def main():
             "where's your office": ("uran", "mumbai", "based", "located"),
             "do interns get paid": ("intern", "paid", "unpaid"),
         }
+        # "is not the generic fallback" used to assert `reply !=
+        # faq_agent._FALLBACK_MESSAGE` - an exact-string check that flaked
+        # whenever a transient Groq/OpenRouter hiccup during the live call
+        # made get_ai_response raise, which correctly routes get_faq_response
+        # to its own keyword-match fallback (find_best_faqs scores these
+        # phrases below _MIN_CONFIDENT_SCORE by design, so that fallback path
+        # itself legitimately returns _FALLBACK_MESSAGE verbatim - not a bug,
+        # just provider unavailability at that moment). What this test
+        # actually wants to confirm is that the AI engaged with the real
+        # question instead of flatly declining, so it checks for the
+        # fallback's own distinctive refusal framing rather than exact
+        # equality to the whole constant - robust to an AI response that
+        # legitimately shares some of the same service-description wording
+        # (XQORA's fallback text mentions its services too) while still
+        # catching a real "declined to answer" response.
+        _faq_refusal_marker = faq_agent._FALLBACK_MESSAGE.split(".")[0].lower()  # "that's not something we handle"
         for phrase, expected_markers in faq_rephrasings.items():
             time.sleep(_REQUEST_PACING_SECONDS)
             reply = faq_agent.get_faq_response(phrase)
+            reply_lower = reply.lower()
             check(
-                f"faq_agent (full-list grounding): '{phrase}' is not the generic fallback",
-                reply != faq_agent._FALLBACK_MESSAGE,
+                f"faq_agent (full-list grounding): '{phrase}' doesn't read like a flat refusal",
+                _faq_refusal_marker not in reply_lower,
                 reply,
             )
             check(
                 f"faq_agent (full-list grounding): '{phrase}' answer is topically relevant",
-                any(marker in reply.lower() for marker in expected_markers),
+                any(marker in reply_lower for marker in expected_markers),
                 reply,
             )
 
@@ -792,8 +830,8 @@ def _bug3_bare_category_words():
 
 def _bug4_no_nudge_after_off_topic_refusal():
     session_id = "regression-bug4-nudge-offtopic"
-    lead_agent.reset_session(session_id)
-    state = lead_agent._get_session(session_id)
+    session_service.reset_lead_state(session_id)
+    state = session_service.get_lead_state(session_id)
     state["_awaiting"] = "name"
 
     db = SessionLocal()
@@ -813,16 +851,16 @@ def _bug4_no_nudge_after_off_topic_refusal():
     check(
         "Bug4 (mocked): lead flow still paused after the refusal (not corrupted)",
         lead_agent.is_collecting(session_id),
-        lead_agent._sessions.get(session_id),
+        session_service._lead_cache.peek(session_id),
     )
-    lead_agent.reset_session(session_id)
+    session_service.reset_lead_state(session_id)
 
     # Contrast case: a genuine alternate-topic answer (escalate, via the
     # deterministic hard_escalate_signal so no AI mock is needed for
     # classification itself) SHOULD still get the resume nudge appended.
     session_id2 = "regression-bug4-nudge-escalate"
-    lead_agent.reset_session(session_id2)
-    state2 = lead_agent._get_session(session_id2)
+    session_service.reset_lead_state(session_id2)
+    state2 = session_service.get_lead_state(session_id2)
     state2["_awaiting"] = "name"
 
     db = SessionLocal()
@@ -837,7 +875,7 @@ def _bug4_no_nudge_after_off_topic_refusal():
         "name" in reply2.lower(),
         reply2,
     )
-    lead_agent.reset_session(session_id2)
+    session_service.reset_lead_state(session_id2)
 
 
 def _bug5_self_identity():
@@ -868,9 +906,9 @@ def _bug5_self_identity():
 
 def _feature_reuse_lead_details():
     session_id = "regression-reuse-lead"
-    lead_agent.reset_session(session_id)
-    lead_agent._completed_leads.pop(session_id, None)
-    lead_agent._store_completed_lead(
+    session_service.reset_lead_state(session_id)
+    session_service._completed_lead_cache.evict_memory_only(session_id)
+    session_service.store_completed_lead(
         session_id,
         {"name": "Jane Smith", "company": "Acme Corp", "email": "jane@acme.com", "phone": "+15551234567"},
     )
@@ -886,7 +924,7 @@ def _feature_reuse_lead_details():
         )
 
         r2 = lead_agent.handle_lead_message(db, session_id, "yes, use the same details", bg)
-        state = lead_agent._sessions[session_id]
+        state = session_service._lead_cache.peek(session_id)
         check(
             "Feature (mocked): reuse fills in the prior contact fields",
             state["name"] == "Jane Smith" and state["email"] == "jane@acme.com" and state["phone"] == "+15551234567",
@@ -907,14 +945,14 @@ def _feature_reuse_lead_details():
         )
     finally:
         db.close()
-        lead_agent.reset_session(session_id)
-        lead_agent._completed_leads.pop(session_id, None)
+        session_service.reset_lead_state(session_id)
+        session_service._completed_lead_cache.evict_memory_only(session_id)
 
     # Contrast case: declining reuse falls back to the normal from-scratch flow.
     session_id2 = "regression-reuse-lead-decline"
-    lead_agent.reset_session(session_id2)
-    lead_agent._completed_leads.pop(session_id2, None)
-    lead_agent._store_completed_lead(
+    session_service.reset_lead_state(session_id2)
+    session_service._completed_lead_cache.evict_memory_only(session_id2)
+    session_service.store_completed_lead(
         session_id2,
         {"name": "Old Name", "company": "Old Co", "email": "old@x.com", "phone": "+15550000000"},
     )
@@ -934,7 +972,7 @@ def _feature_reuse_lead_details():
             "name" in r2.reply.lower(),
             r2.reply,
         )
-        state2 = lead_agent._sessions[session_id2]
+        state2 = session_service._lead_cache.peek(session_id2)
         check(
             "Feature (mocked): declined reuse leaves all fields unset (no stale data carried over)",
             state2["name"] is None and state2["email"] is None,
@@ -942,8 +980,8 @@ def _feature_reuse_lead_details():
         )
     finally:
         db.close()
-        lead_agent.reset_session(session_id2)
-        lead_agent._completed_leads.pop(session_id2, None)
+        session_service.reset_lead_state(session_id2)
+        session_service._completed_lead_cache.evict_memory_only(session_id2)
 
 
 def _bug6_faq_recommend_full_list_grounding():
@@ -1063,6 +1101,70 @@ def _bug6_faq_recommend_full_list_grounding():
     )
 
 
+def _bug7_total_ai_outage_no_fake_content():
+    """When BOTH Groq and its OpenRouter fallback fail (ai_service.py raises
+    AIServiceError only after exhausting both), classify_intent must not
+    silently default to "faq" - that used to route the message into
+    get_faq_response, which would itself hit the same outage and return a
+    keyword-matched (or fully generic) answer that reads as a real, grounded
+    reply to a question the bot never actually understood. Instead it should
+    return an honest "can't process this right now" and a distinct,
+    greppable "ai_unavailable" intent/log marker - checked here at both the
+    unit level (classify_intent directly) and through the full orchestrator
+    (handle_message), plus confirming the deterministic pre-AI paths
+    (greeting, off-topic) are completely unaffected by the same outage."""
+    with patch("app.agents.intent_agent.get_ai_response", side_effect=AIServiceError("both providers down")):
+        result = classify_intent("I need a chatbot built for my business, what do you suggest?")
+    check(
+        "Bug7 (mocked): total AI outage does NOT silently default to faq",
+        result.intent != "faq",
+        result,
+    )
+    check(
+        "Bug7 (mocked): total AI outage returns a distinct 'ai_unavailable' intent, blocked with the honest message",
+        result.intent == "ai_unavailable" and result.blocked and result.refusal_message == AI_UNAVAILABLE_RESPONSE,
+        result,
+    )
+
+    session_id = "regression-bug7-ai-outage"
+    session_service.reset_lead_state(session_id)
+    db = SessionLocal()
+    try:
+        with patch("app.agents.intent_agent.get_ai_response", side_effect=AIServiceError("both providers down")):
+            reply = handle_message(db, session_id, "I need a chatbot built for my business", BackgroundTasks())
+    finally:
+        db.close()
+    check(
+        "Bug7 (mocked): orchestrator surfaces the honest outage message verbatim, not fabricated FAQ content",
+        reply == AI_UNAVAILABLE_RESPONSE,
+        reply,
+    )
+    row = last_chat_history_row(session_id)
+    check(
+        "Bug7 (mocked): outage turn logged with the distinct ai_unavailable intent, easy to spot separately from faq",
+        row is not None and row.intent == "ai_unavailable",
+        str(row),
+    )
+
+    # Rule-based paths (greeting, off-topic keyword match) must still work
+    # fine with the AI fully down - only the AI-guess fallback path needed
+    # this safety net.
+    with patch("app.agents.intent_agent.get_ai_response", side_effect=AIServiceError("both providers down")):
+        greeting_result = classify_intent("hi")
+        off_topic_result = classify_intent("write me a python script to sort a list")
+    check(
+        "Bug7 (mocked): greeting still classified correctly with AI fully down (no AI call needed)",
+        greeting_result.intent == "greeting" and greeting_result.blocked,
+        greeting_result,
+    )
+    check(
+        "Bug7 (mocked): off-topic keyword match still refused correctly with AI fully down (no AI call needed)",
+        off_topic_result.intent == "off_topic" and off_topic_result.blocked,
+        off_topic_result,
+    )
+    session_service.reset_lead_state(session_id)
+
+
 def _feedback_response_parsing_unit():
     check("Feedback (mocked): is_closing_message matches 'thanks'", feedback_agent.is_closing_message("thanks"), None)
     check(
@@ -1099,14 +1201,14 @@ def _feedback_response_parsing_unit():
 
 def _feedback_after_lead_submission():
     session_id = "regression-feedback-after-lead"
-    lead_agent.reset_session(session_id)
-    lead_agent._completed_leads.pop(session_id, None)
+    session_service.reset_lead_state(session_id)
+    session_service._completed_lead_cache.evict_memory_only(session_id)
     feedback_agent.reset(session_id)
 
     # Seed the session one field away from finalization - the "message" field
     # is free-form (no AI field-matching call), so finishing the lead here is
     # fully deterministic and needs no mocking.
-    state = lead_agent._get_session(session_id)
+    state = session_service.get_lead_state(session_id)
     state["name"] = "Sam Lee"
     state["company"] = "Sam Co"
     state["email"] = "sam@samco.com"
@@ -1129,8 +1231,8 @@ def _feedback_after_lead_submission():
         feedback_agent.is_awaiting_response(session_id),
         None,
     )
-    lead_agent.reset_session(session_id)
-    lead_agent._completed_leads.pop(session_id, None)
+    session_service.reset_lead_state(session_id)
+    session_service._completed_lead_cache.evict_memory_only(session_id)
     return session_id
 
 
@@ -1163,7 +1265,7 @@ def _feedback_rating_and_comment_saved(session_id):
 def _feedback_after_escalation():
     session_id = "regression-feedback-after-escalate"
     feedback_agent.reset(session_id)
-    lead_agent.reset_session(session_id)
+    session_service.reset_lead_state(session_id)
 
     # hard_escalate_signal is a pure-code deterministic gate (no AI call
     # needed for classification itself), and get_escalation_response() is
@@ -1186,7 +1288,7 @@ def _feedback_after_escalation():
 def _feedback_ignored_does_not_loop_or_misfire():
     session_id = "regression-feedback-ignored"
     feedback_agent.reset(session_id)
-    lead_agent.reset_session(session_id)
+    session_service.reset_lead_state(session_id)
 
     db = SessionLocal()
     try:
@@ -1240,7 +1342,7 @@ def _feedback_ignored_does_not_loop_or_misfire():
     )
 
     feedback_agent.reset(session_id)
-    lead_agent.reset_session(session_id)
+    session_service.reset_lead_state(session_id)
 
 
 def _feature_lead_session_db_persistence():
@@ -1253,7 +1355,7 @@ def _feature_lead_session_db_persistence():
     afterward, it proves the DB read-through fallback (not just the
     in-memory dict) is what's carrying the state."""
     session_id = "regression-lead-session-db-persistence"
-    lead_agent.reset_session(session_id)
+    session_service.reset_lead_state(session_id)
 
     db = SessionLocal()
     try:
@@ -1281,10 +1383,8 @@ def _feature_lead_session_db_persistence():
     # Simulate a server restart: wipe the in-memory cache + its lock (this
     # is literally what a fresh process starts with), then continue the
     # SAME session - it must resume from "company", not restart from "name".
-    with lead_agent._sessions_lock:
-        lead_agent._sessions.pop(session_id, None)
-    with lead_agent._session_locks_lock:
-        lead_agent._session_locks.pop(session_id, None)
+    session_service._lead_cache.evict_memory_only(session_id)
+    session_service._evict_session_lock(session_id)
 
     db = SessionLocal()
     try:
@@ -1299,21 +1399,20 @@ def _feature_lead_session_db_persistence():
         r3.reply,
     )
 
-    with lead_agent._sessions_lock:
-        state_after = dict(lead_agent._sessions.get(session_id) or {})
+    state_after = dict(session_service._lead_cache.peek(session_id) or {})
     check(
         "DB persistence: reloaded state kept the name captured before the simulated restart",
         state_after.get("name") == "Jordan Lee" and state_after.get("company") == "Acme Rockets",
         state_after,
     )
 
-    lead_agent.reset_session(session_id)
+    session_service.reset_lead_state(session_id)
     db = SessionLocal()
     try:
         cleared = load_lead_session(db, session_id)
     finally:
         db.close()
-    check("DB persistence: reset_session also clears the persisted row", cleared is None, cleared)
+    check("DB persistence: reset_lead_state also clears the persisted row", cleared is None, cleared)
 
 
 def _feature_session_isolation_concurrent_leads():
@@ -1326,8 +1425,8 @@ def _feature_session_isolation_concurrent_leads():
     catch one session's data leaking into a still-open other session."""
     session_a = "regression-isolation-a"
     session_b = "regression-isolation-b"
-    lead_agent.reset_session(session_a)
-    lead_agent.reset_session(session_b)
+    session_service.reset_lead_state(session_a)
+    session_service.reset_lead_state(session_b)
 
     db = SessionLocal()
     try:
@@ -1344,9 +1443,8 @@ def _feature_session_isolation_concurrent_leads():
     finally:
         db.close()
 
-    with lead_agent._sessions_lock:
-        state_a = dict(lead_agent._sessions.get(session_a) or {})
-        state_b = dict(lead_agent._sessions.get(session_b) or {})
+    state_a = dict(session_service._lead_cache.peek(session_a) or {})
+    state_b = dict(session_service._lead_cache.peek(session_b) or {})
 
     check(
         "Isolation: session A kept its own name/company, unaffected by session B's interleaved turns",
@@ -1374,8 +1472,8 @@ def _feature_session_isolation_concurrent_leads():
         (persisted_a, persisted_b),
     )
 
-    lead_agent.reset_session(session_a)
-    lead_agent.reset_session(session_b)
+    session_service.reset_lead_state(session_a)
+    session_service.reset_lead_state(session_b)
 
 
 def _feature_sheets_and_email_forward_failure_isolation():
@@ -1480,6 +1578,7 @@ def run_mocked_tests():
     _bug_escalate_vs_unrelated_professional_service()
     _bug_check_in_and_trivia_misclassification()
     _bug6_faq_recommend_full_list_grounding()
+    _bug7_total_ai_outage_no_fake_content()
     _feature_reuse_lead_details()
     _feature_lead_session_db_persistence()
     _feature_session_isolation_concurrent_leads()

@@ -13,10 +13,12 @@ from app.agents import feedback_agent
 from app.agents.escalation_agent import get_escalation_response
 from app.agents.faq_agent import get_faq_response
 from app.agents.intent_agent import classify_intent
-from app.agents.lead_agent import LEAD_FIELDS, get_lead_info, handle_lead_message, is_collecting
+from app.agents.lead_agent import get_lead_info, handle_lead_message, is_collecting
 from app.agents.recommend_agent import get_recommendation_response
 from app.database import get_recent_chat_history, save_chat_history
 from app.prompt import CLOSING_RESPONSE, FEEDBACK_ASK
+from app.services import session_service
+from app.services.session_service import LEAD_FIELDS
 
 logger = logging.getLogger("xqora.orchestrator")
 
@@ -208,24 +210,31 @@ def _route(
     return reply, result.intent
 
 
-def _append_feedback_ask(session_id: str, reply: str) -> str:
-    feedback_agent.mark_asked(session_id)
+def _append_feedback_ask(db: Session, session_id: str, reply: str) -> str:
+    feedback_agent.mark_asked(session_id, db=db)
     return f"{reply}\n\n{FEEDBACK_ASK}"
 
 
-def handle_message(db: Session, session_id: str, message: str, background_tasks: BackgroundTasks) -> str:
+def _handle_message_impl(
+    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
+) -> tuple[str, str]:
+    # Single piggyback point for the TTL sweep (lead state, feedback state,
+    # completed-lead cache, per-session locks) - see session_service for why
+    # this used to be two near-identical sweeps triggered independently.
+    session_service.sweep_expired_sessions()
+
     if feedback_agent.is_awaiting_response(session_id):
         feedback_result = feedback_agent.handle_feedback_response(db, session_id, message)
         if feedback_result.handled:
             save_chat_history(
                 db, session_id=session_id, message=message, response=feedback_result.reply, intent="feedback"
             )
-            return feedback_result.reply
+            return feedback_result.reply, "feedback"
 
     if feedback_agent.should_ask(session_id) and feedback_agent.is_closing_message(message):
-        reply = _append_feedback_ask(session_id, CLOSING_RESPONSE)
+        reply = _append_feedback_ask(db, session_id, CLOSING_RESPONSE)
         save_chat_history(db, session_id=session_id, message=message, response=reply, intent="closing")
-        return reply
+        return reply, "closing"
 
     if is_collecting(session_id):
         lead_result = handle_lead_message(db, session_id, message, background_tasks)
@@ -233,9 +242,9 @@ def handle_message(db: Session, session_id: str, message: str, background_tasks:
         if lead_result.consumed:
             reply = lead_result.reply
             if lead_result.finalized and feedback_agent.should_ask(session_id):
-                reply = _append_feedback_ask(session_id, reply)
+                reply = _append_feedback_ask(db, session_id, reply)
             save_chat_history(db, session_id=session_id, message=message, response=reply, intent="lead")
-            return reply
+            return reply, "lead"
         reply, intent_label = _route(db, session_id, message, background_tasks, skip_handler_intents={"lead"})
         if intent_label == "lead":
             combined_reply = lead_result.reply
@@ -245,15 +254,31 @@ def handle_message(db: Session, session_id: str, message: str, background_tasks:
             combined_reply = f"{reply}\n\n{lead_result.reply}"
 
         save_chat_history(db, session_id=session_id, message=message, response=combined_reply, intent=intent_label)
-        return combined_reply
+        return combined_reply, intent_label
 
     reply, intent_label = _route(db, session_id, message, background_tasks)
 
     if intent_label in ("off_topic", "greeting"):
-        return reply
+        return reply, intent_label
 
     if intent_label == "escalate" and feedback_agent.should_ask(session_id):
-        reply = _append_feedback_ask(session_id, reply)
+        reply = _append_feedback_ask(db, session_id, reply)
 
     save_chat_history(db, session_id=session_id, message=message, response=reply, intent=intent_label)
+    return reply, intent_label
+
+
+def handle_message(db: Session, session_id: str, message: str, background_tasks: BackgroundTasks) -> str:
+    reply, _ = _handle_message_impl(db, session_id, message, background_tasks)
     return reply
+
+
+def handle_message_with_intent(
+    db: Session, session_id: str, message: str, background_tasks: BackgroundTasks
+) -> tuple[str, str]:
+    """Same as handle_message but also returns the classified intent label,
+    so callers (the /chat route) can tell the frontend when a greeting fired
+    - used to re-show the quick-reply buttons under every greeting, not just
+    the very first one, without changing handle_message's existing str
+    return type that other callers/tests depend on."""
+    return _handle_message_impl(db, session_id, message, background_tasks)
